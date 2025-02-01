@@ -6,6 +6,8 @@ However, chances that it'll break already working Dante network are low.
 
 Big thanks to [Project Pendulum](https://github.com/pendulum-project) (by [Trifecta Tech Foundation](https://trifectatech.org/)) for creating and maintaining [Statime](https://github.com/pendulum-project/statime) and collaboration on features needed for audiovisual networks functionality! Audio transmission would be much more difficult to implement without it.
 
+Respect to the engineers at Audinate for well-designed protocol and robust hardware devices, but the suits that decided to keep the protocol secret, ignore FOSS community and paywall a device driver should go to... [Inferno](https://en.wikipedia.org/wiki/Inferno_(Dante))!
+
 # Features
 * receiving audio from and sending audio to Dante devices and virtual devices
 * connections can be made using Dante Controller or [network-audio-controller](https://github.com/chris-ritsen/network-audio-controller) (`netaudio` command line tool)
@@ -18,7 +20,7 @@ Big thanks to [Project Pendulum](https://github.com/pendulum-project) (by [Trife
 | Platforms | Linux  | Mac, Windows  | Linux |
 | Supported protocols | Dante | Dante | AES67 |
 | Directly supported audio backends | ALSA, PipeWire | CoreAudio, ASIO, WDM | ALSA |
-| Works with DAWs | 💣 experimental, with PipeWire | ✅ Yes | ✅ Yes |
+| Works with DAWs | 💣 experimental | ✅ Yes | ✅ Yes |
 | Route audio using Dante Controller patchbay | ✅ Yes! | ✅ Yes | 🚫 AES67->Dante only |
 | Configurable using Dante Controller | ⏳ Mostly not yet | ✅ Yes | 🚫 No |
 | Compatible with Dante Domain Manager | 🚫 No | ✅ Yes | 🚫 No (but AES67 integration possible) |
@@ -41,7 +43,7 @@ Big thanks to [Project Pendulum](https://github.com/pendulum-project) (by [Trife
 * ✅ - usable
 * 💣 - experimental
 * ☑️ - not a part of this software but integration is easily possible
-* ⏳ - will be implemented soon (in 2024 probably)
+* ⏳ - will be implemented soon (until 2025-06 probably)
 * 🚫 - unimplemented and not planned for the near future
 
 ## Quirks, read it before using:
@@ -69,7 +71,7 @@ This project makes no claim to be either authorized or approved by Audinate.
 4. `cd` to the desired program/library directory
    * simple command line audio recorder: [`Inferno2pipe`](inferno2pipe/README.md)
    * virtual soundcard for ALSA: [`alsa_pcm_inferno`](alsa_pcm_inferno/README.md) - also works with PipeWire, should work with JACK (not tested yet)
-   * virtual soundcard for PipeWire: `inferno_wired` (not maintained)
+   * <s>virtual soundcard for PipeWire: `inferno_wired` (not maintained)</s>
 5. `cargo build`
 6. Follow the instructions in README of the specific program/library
 
@@ -106,10 +108,11 @@ This project makes no claim to be either authorized or approved by Audinate.
 * `INFERNO_DEVICE_ID` - 16 hexadecimal digits (8 bytes) used as a device ID. Dante devices usually use MAC address padded with zeros. Inferno uses `0000<IP address>0000` by default. Device ID is the storage key when saving state.
 * `INFERNO_NAME` - name of advertised device. If unspecified, name based on app name and IP address will be generated.
 * `INFERNO_SAMPLE_RATE` - sample rate this device will operate on
-
+* `INFERNO_PROCESS_ID` - integer number between 0 and 65535. Must be provided and unique when starting multiple instances on a single IP address. Specifying different `INFERNO_DEVICE_ID`s is not sufficient.
+* `INFERNO_ALT_PORT` - start of the range of UDP ports used by socket listeners. If not specified, standard Dante ports as seen in hardware devices will be used. Must be provided when starting multiple instances on a single IP address. Currently 4 ports are used (`INFERNO_ALT_PORT` to `INFERNO_ALT_PORT+3`) but it may change in the future, so better separate different instances by at least 10 ports.
 
 # Contributing
-Issue reports and pull requests are welcome. However I'm currently taking a break from this project and will be back in June or July 2023.
+Issue reports and pull requests are welcome.
 
 By submitting any contribution, you agree that it will be distributed according to the comment found at the top of `inferno_aoip/src/lib.rs` file - under the terms of GNU GPL v3 or any later version.
 
@@ -138,8 +141,8 @@ initial release
 # To do
 likely in order they'll be implementated
 
-* use multicast flows when available
 * ability to change channel names and settings in Dante Controller
+* transmit multicast flows
 
 At this point, Inferno will roughly become alternative to Dante Virtual Soundcard.
 

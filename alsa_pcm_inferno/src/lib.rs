@@ -142,7 +142,7 @@ unsafe fn get_private<'a>(io: *mut snd_pcm_ioplug_t) -> &'a mut MyIOPlug {
 
 unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframes_t {
     let this = get_private(io);
-    let cur = this.current_timestamp.load(Ordering::SeqCst /*XXX*/);
+    let cur = this.current_timestamp.load(Ordering::SeqCst /*TODO: really needed?*/);
 
     // TODO may be non-monotonic in edge cases (switching between clocks)
     // TODO rethink int sizes here

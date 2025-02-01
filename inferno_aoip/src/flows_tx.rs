@@ -199,7 +199,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       counter += 1;
 
       let command = if sleep_duration < SELECT_THRESHOLD {
-        self.current_timestamp.store(min_next_ts.map(|n|n.try_into().unwrap()).unwrap_or(usize::MAX), Ordering::SeqCst /*XXX*/);
+        self.current_timestamp.store(min_next_ts.map(|n|n as usize).map(|n|if n==usize::MAX { usize::MAX-1 } else { n }).unwrap_or(usize::MAX), Ordering::SeqCst /*TODO: really needed?*/);
         std::thread::sleep(sleep_duration);
         self.transmit(&mut dither_rng, process_events);
         if process_events {
