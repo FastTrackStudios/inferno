@@ -5,10 +5,10 @@ pub type Sample = i32;
 pub type USample = u32;
 
 /// Audio clock (number of samples since arbitrary epoch)
-pub type Clock = u64;
+pub type Clock = usize;
 
 /// Signed version of the clock. For clock deltas.
-pub type ClockDiff = i64;
+pub type ClockDiff = isize;
 
 /// Subtract clocks and return the result as a signed number.
 /// Hint: wrapped `a > b` is equivalent to `wrapped_diff(a, b) > 0`

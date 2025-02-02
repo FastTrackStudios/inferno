@@ -4,7 +4,7 @@ use alsa_sys_all::*;
 
 use futures_util::FutureExt;
 use inferno_aoip::utils::{run_future_in_new_thread, LogAndForget};
-use inferno_aoip::{AtomicSample, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, RealTimeClockReceiver, Sample, SelfInfoBuilder};
+use inferno_aoip::{AtomicSample, Clock, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, RealTimeClockReceiver, Sample, SelfInfoBuilder};
 use lazy_static::lazy_static;
 use libc::{c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN};
 use tokio::sync::{mpsc, oneshot};
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 struct StartArgs {
     channels: Vec<ExternalBufferParameters<Sample>>,
-    start_time_rx: oneshot::Receiver<u64>,
+    start_time_rx: oneshot::Receiver<Clock>,
     clock_rx_tx: oneshot::Sender<RealTimeClockReceiver>,
     current_timestamp: Arc<AtomicUsize>,
     on_transfer: Box<dyn Fn() + Send + Sync + 'static>,
@@ -128,8 +128,8 @@ struct MyIOPlug {
     buffers_valid: Arc<RwLock<bool>>,
     media_clock: MediaClock,
     clock_receiver: Option<RealTimeClockReceiver>,
-    start_time: Option<usize>,
-    start_time_tx: Option<oneshot::Sender<u64>>,
+    start_time: Option<Clock>,
+    start_time_tx: Option<oneshot::Sender<Clock>>,
     current_timestamp: Arc<AtomicUsize>,
     on_transfer_eventfd: libc::c_int,
     on_transfer: Box<dyn Fn() + Send + Sync>,
@@ -256,7 +256,7 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     });
     this.start_time = None;
 
-    let (start_time_tx, start_time_rx) = oneshot::channel::<u64>();
+    let (start_time_tx, start_time_rx) = oneshot::channel::<Clock>();
     let (clock_rx_tx, clock_rx_rx) = oneshot::channel::<RealTimeClockReceiver>();
 
     init_common(this.self_info.clone());

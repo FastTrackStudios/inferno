@@ -182,7 +182,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     if let Some(rx) = &mut start_time_rx {
       match rx.await {
         Ok(start_time) => {
-          self.timestamp_shift = 0i64.wrapping_sub_unsigned(start_time).wrapping_sub_unsigned(self.send_latency_samples.try_into().unwrap());
+          self.timestamp_shift = (0 as ClockDiff).wrapping_sub_unsigned(start_time).wrapping_sub_unsigned(self.send_latency_samples.try_into().unwrap());
         },
         Err(e) => {
           error!("unable to get start timestamp for ring buffer output: {e:?}");
@@ -297,7 +297,7 @@ impl FlowsTransmitter {
       clock: MediaClock::new(),
       channels_sources: channels_outputs,
       send_latency_samples: latency.try_into().unwrap(), // TODO in ALSA plugin should be 0, the more the worse because aplay wants to fill the whole buffer
-      timestamp_shift: 0i64.wrapping_sub_unsigned(latency.into()),
+      timestamp_shift: (0 as ClockDiff).wrapping_sub_unsigned(latency.try_into().unwrap()),
       current_timestamp,
       on_transfer,
       /* callback: Box::new(|mut timestamp: Clock, ch_index: usize, buffer: &mut [Sample]| {

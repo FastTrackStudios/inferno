@@ -62,7 +62,7 @@ impl<P: ProxyToSamplesBuffer> Channel<P> {
       }
     }
     if !good {
-      warn!("wanted {start_timestamp}..{} but has ..{}", start_timestamp + buffer.len() as u64, self.source.readable_until());
+      warn!("wanted {start_timestamp}..{} but has ..{}", start_timestamp + buffer.len(), self.source.readable_until());
     }
     good
   }
@@ -177,9 +177,8 @@ fn get_min_max_end_timestamps<'a, P: ProxyToSamplesBuffer + 'a>(channels: impl I
     .map(|ch| ch.source.readable_until())
     .collect_vec();
   Some((
-    clocks.iter().min_by(|&&a, &&b| wrapped_diff(a as Clock, b as Clock).cmp(&0))?.to_owned().try_into().unwrap(),
-    clocks.iter().max_by(|&&a, &&b| wrapped_diff(a as Clock, b as Clock).cmp(&0))?.to_owned().try_into().unwrap()
-    // XXX FIXME wrapping not handled correctly when sizeof(Clock) > sizeof(usize)
+    clocks.iter().min_by(|&&a, &&b| wrapped_diff(a, b).cmp(&0))?.to_owned().try_into().unwrap(),
+    clocks.iter().max_by(|&&a, &&b| wrapped_diff(a, b).cmp(&0))?.to_owned().try_into().unwrap()
   ))
 }
 
@@ -232,7 +231,7 @@ impl<P: ProxyToSamplesBuffer> PeriodicSamplesCollector<P> {
                       // it would break our assumption that each channel has *at least* readable_samples_count readable.
                       // that's why we need this check.
                       // XXX FIXME wrapping
-                      if wrapped_diff(ch.source.readable_until() as u64, readable_until as u64) < 0 {
+                      if wrapped_diff(ch.source.readable_until(), readable_until) < 0 {
                         None
                       } else {
                         Some(ch)

@@ -17,8 +17,14 @@ use crate::{common::*, real_time_box_channel};
 use crate::real_time_box_channel::RealTimeBoxReceiver;
 pub type RealTimeClockReceiver = RealTimeBoxReceiver<Option<ClockOverlay>>;
 
+/// High-precision clock (nanoseconds)
+pub type FineClock = u64;
+
+/// Signed version of the high-precision clock. For clock deltas.
+pub type FineClockDiff = i64;
+
 // it's better to have the clock in the past than in the future - otherwise Dante devices receiving from us go mad and fart
-const CLOCK_OFFSET_NS: ClockDiff = -500_000;
+const CLOCK_OFFSET_NS: FineClockDiff = -500_000;
 
 
 #[derive(Clone)]
@@ -27,8 +33,8 @@ pub struct MediaClock {
 }
 
 #[inline(always)]
-fn timestamp_to_clock_value(ts: clock_steering::Timestamp) -> Clock {
-  (ts.seconds as Clock).wrapping_mul(1_000_000_000).wrapping_add(ts.nanos as Clock)
+fn timestamp_to_clock_value(ts: clock_steering::Timestamp) -> FineClock {
+  (ts.seconds as FineClock).wrapping_mul(1_000_000_000).wrapping_add(ts.nanos as FineClock)
 }
 
 impl MediaClock {
@@ -44,7 +50,7 @@ impl MediaClock {
     &self.overlay
   }
   pub fn update_overlay(&mut self, mut overlay: ClockOverlay) {
-    overlay.shift = overlay.shift.wrapping_add(CLOCK_OFFSET_NS as i64);
+    overlay.shift = overlay.shift.wrapping_add(CLOCK_OFFSET_NS);
     if let Some(cur_overlay) = self.overlay {
       let cur_ovl_time = cur_overlay.now_ns();
       let new_ovl_time = overlay.now_ns();
@@ -58,8 +64,8 @@ impl MediaClock {
     self.overlay = Some(overlay);
   }
   #[inline(always)]
-  pub fn now_ns(&self) -> Option<Clock> {
-    self.overlay.map(|overlay| { overlay.now_ns() as Clock })
+  pub fn now_ns(&self) -> Option<FineClock> {
+    self.overlay.map(|overlay| { overlay.now_ns() as FineClock })
   }
   #[inline(always)]
   pub fn now_in_timebase(&self, timebase_hz: u64) -> Option<Clock> {
@@ -70,9 +76,9 @@ impl MediaClock {
   }
   pub fn system_clock_duration_until(&self, timestamp: Clock, timebase_hz: u64) -> Option<std::time::Duration> {
     let now_ns = self.now_ns()?;
-    let to_ns = (timestamp as u128 * 1_000_000_000u128 / timebase_hz as u128) as Clock;
-    let remaining = (to_ns as ClockDiff).wrapping_sub(now_ns as ClockDiff);
-    let corr = (remaining as f64 * self.overlay?.freq_scale) as ClockDiff;
+    let to_ns = (timestamp as u128 * 1_000_000_000u128 / timebase_hz as u128) as FineClock;
+    let remaining = (to_ns as FineClockDiff).wrapping_sub(now_ns as FineClockDiff);
+    let corr = (remaining as f64 * self.overlay?.freq_scale) as FineClockDiff;
     let duration = remaining - corr; // FIXME it should be * 1/(1+freq_scale) but should be good enough for low correction values
     if duration > 0 {
       Some(std::time::Duration::from_nanos(duration as u64))
