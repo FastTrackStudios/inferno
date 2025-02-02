@@ -421,6 +421,21 @@ pub async fn run_server(
             conn.respond(&[]).await;
           }
         }
+
+        0x3014 => {
+          // netaudio subscription remove
+          // received unknown opcode1 0x3014, content 000100000002
+          // whole packet: "27ff00104a1c30140000000100000002"
+          if let Some(channels_recv) = &subscriber {
+            let content = request.content();
+            let local_channel = make_u16(content[4], content[5]);
+            let local_channel_index = (local_channel - 1) as usize;
+            info!("disconnect requested: local channel {}", local_channel);
+            channels_recv.unsubscribe(local_channel_index).await;
+            conn.respond(&[]).await;
+          }
+        }
+
         x => {
           error!("received unknown opcode1 {x:#04x}, content {}", hex::encode(request.content()));
           error!("whole packet: {:?}", hex::encode(request.into_storage()));
