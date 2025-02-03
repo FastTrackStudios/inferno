@@ -62,18 +62,20 @@ This project makes no claim to be either authorized or approved by Audinate.
 
 # Quick start
 1. [Install Rust](https://rustup.rs/)
-2. If wanting to use anything other than Inferno2pipe, clock synchronization daemon is needed. Inferno is compatible with modified [Statime](https://github.com/pendulum-project/statime):
+2. If using a firewall, open UDP ports: 4455, 8700, 4400, 8800 (or others if [`INFERNO_ALT_PORT`](#environment-variables) is specified), 5353. Also, allow incoming UDP traffic from possible transmitters (port numbers are allocated by the OS so we can't be specific here)
+3. <s>If wanting to use anything other than Inferno2pipe,</s> clock synchronization daemon is needed. Inferno is compatible with modified [Statime](https://github.com/pendulum-project/statime):
+   * currently, Statime is always needed, even for just capturing audio, but it is not by design and will be fixed
    * `git clone -b inferno-dev https://github.com/teodly/statime`
    * `cd statime && cargo build`
    * adjust network interface in `inferno-ptpv1.toml`
    * `sudo target/debug/statime -c inferno-ptpv1.toml`
-3. Clone this repo with `--recursive` option (some dependencies are in submodules)
-4. `cd` to the desired program/library directory
+4. Clone this repo with `--recursive` option (some dependencies are in submodules)
+5. `cd` to the desired program/library directory
    * simple command line audio recorder: [`Inferno2pipe`](inferno2pipe/README.md)
    * virtual soundcard for ALSA: [`alsa_pcm_inferno`](alsa_pcm_inferno/README.md) - also works with PipeWire, should work with JACK (not tested yet)
    * <s>virtual soundcard for PipeWire: `inferno_wired` (not maintained)</s>
-5. `cargo build`
-6. Follow the instructions in README of the specific program/library
+6. `cargo build`
+7. Follow the instructions in README of the specific program/library
 
 
 # Tested with

@@ -30,7 +30,8 @@ struct Multicaster<'s> {
   pub server: UdpSocketWrapper,
   seqnum: u16,
   vendor: [u8; 8],
-  library_version_bytes: [u8; 4],
+  firmware_version_bytes: [u8; 4],
+  product_version_bytes: [u8; 4],
   device_info_destination: SocketAddr,
   heartbeat_destination: SocketAddr,
   send_buffer: [u8; SEND_BUFFER_SIZE],
@@ -44,7 +45,8 @@ impl<'s> Multicaster<'s> {
       server,
       seqnum: 1,
       vendor: [32; 8],
-      library_version_bytes: [
+      firmware_version_bytes: [4, 1, 6, 2],
+      product_version_bytes: [
         env!("CARGO_PKG_VERSION_MAJOR").parse::<u8>().unwrap(),
         env!("CARGO_PKG_VERSION_MINOR").parse::<u8>().unwrap(),
         H(patch_version),
@@ -86,11 +88,11 @@ impl<'s> Multicaster<'s> {
   async fn send_board_info(&mut self) {
     let mut content = [0u8; 200];
     // Firmware version:
-    content[0..4].copy_from_slice(&self.library_version_bytes);
-    content[0x23] = 0;
+    content[0..4].copy_from_slice(&[4, 1, 0, 6]);
+    content[0x23] = 2;
     // Hardware version:
-    content[4..8].copy_from_slice(&[1, 3, 0, 3]);
-    content[0x27] = 7;
+    content[4..8].copy_from_slice(&[4, 1, 0, 3]);
+    content[0x27] = 1;
     // Boot version:
     content[0x28..0x2c].copy_from_slice(&[1, 0, 0, 0]);
 
@@ -125,7 +127,7 @@ impl<'s> Multicaster<'s> {
     write_str_to_buffer(&mut content, 0x2c, 16, &self.self_info.manufacturer);
     write_str_to_buffer(&mut content, 0xac, 16, &self.self_info.model_name);
     // version number:
-    content[0x12c..0x130].copy_from_slice(&self.library_version_bytes);
+    content[0x12c..0x130].copy_from_slice(&self.product_version_bytes);
 
     self
       .send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0xc0, 0, 0, 0, 0], &content)

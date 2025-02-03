@@ -266,8 +266,9 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
         this.start_time_tx = None;
         this.current_timestamp.store(usize::MAX, Ordering::SeqCst);
         let args = StartArgs {
-            channels: channels_buffers, 
-            start_time_rx, clock_rx_tx, 
+            channels: channels_buffers,
+            start_time_rx,
+            clock_rx_tx,
             current_timestamp: this.current_timestamp.clone(),
             on_transfer: Box::new(this.on_transfer.as_ref().clone()),
         };
@@ -362,7 +363,10 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
     0
 }
 
-unsafe extern "C" fn plugin_transfer(io: *mut snd_pcm_ioplug_t, areas: *const snd_pcm_channel_area_t, offset: snd_pcm_uframes_t, size: snd_pcm_uframes_t) -> snd_pcm_sframes_t {
+unsafe extern "C" fn plugin_capture_transfer(io: *mut snd_pcm_ioplug_t, areas: *const snd_pcm_channel_area_t, offset: snd_pcm_uframes_t, size: snd_pcm_uframes_t) -> snd_pcm_sframes_t {
+    let this = get_private(io);
+    let need_samples_until = (offset as Clock).wrapping_add(size as Clock);
+
     //println!("plugin_transfer called, size: {:?}", size);
     size as snd_pcm_sframes_t
 }
@@ -391,17 +395,21 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 
     let efd = eventfd(0, EFD_CLOEXEC);
 
+    let mut callbacks = snd_pcm_ioplug_callback_t {
+        prepare: Some(plugin_prepare),
+        start: Some(plugin_start),
+        stop: Some(plugin_stop),
+        pointer: Some(plugin_pointer),
+        close: Some(plugin_close),
+        ..zeroed()
+    };
+    if stream==SND_PCM_STREAM_CAPTURE {
+        callbacks.transfer = Some(plugin_capture_transfer);
+    }
+
     let myio = Box::into_raw(Box::new(MyIOPlug {
         io: zeroed(),
-        callbacks: snd_pcm_ioplug_callback_t {
-            prepare: Some(plugin_prepare),
-            start: Some(plugin_start),
-            stop: Some(plugin_stop),
-            pointer: Some(plugin_pointer),
-            //transfer: Some(plugin_transfer),
-            close: Some(plugin_close),
-            ..zeroed()
-        },
+        callbacks,
         self_info: DeviceInfo::new_self(&format!("{app_name} via Inferno-AoIP"), &app_name, None).make_rx_channels(*rx_channels_count).make_tx_channels(*tx_channels_count),
         ref_time: Instant::now(),
         stream_info: None,
@@ -463,7 +471,7 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 
     let min_samples = 64; // must be power of 2
     let max_samples = 16384;
-    let bytes_per_sample = 4;
+    let bytes_per_sample = size_of::<Sample>() as u32;
 
     let r = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIOD_BYTES as i32, num_channels*bytes_per_sample*min_samples, num_channels*bytes_per_sample*max_samples);
     if r < 0 {
