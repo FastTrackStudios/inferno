@@ -19,7 +19,7 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 | Maturity | 💣 Alpha | ✅ Production-ready | ✅ Probably stable |
 | Platforms | Linux  | Mac, Windows  | Linux |
 | Supported protocols | Dante | Dante | AES67 |
-| Directly supported audio backends | ALSA, PipeWire | CoreAudio, ASIO, WDM | ALSA |
+| Directly supported audio backends | ALSA | CoreAudio, ASIO, WDM | ALSA |
 | Works with DAWs | 💣 experimental | ✅ Yes | ✅ Yes |
 | Route audio using Dante Controller patchbay | ✅ Yes! | ✅ Yes | 🚫 AES67->Dante only |
 | Configurable using Dante Controller | ⏳ Mostly not yet | ✅ Yes | 🚫 No |
@@ -49,7 +49,6 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 ## Quirks, read it before using:
 * Dante protocol is undocumented. Everything was reverse-engineered or based on other reverse-engineering projects. Some things in implementation were guessed. So while it works with my setup, it may not work with yours.
 * channel names can't be changed. If you try to change them, Dante Controller may get confused
-* receiving from multicast flows isn't supported yet, unicast connection will be made
 * Inferno2pipe is clocked by incoming media flows. When nothing is connected, "time will stop" (i.e. recording will pause) until something is connected again - silence won't be generated unless at least one channel is connected.
 * it will not start if there is no default route in OS routing table
 
@@ -62,7 +61,7 @@ This project makes no claim to be either authorized or approved by Audinate.
 
 # Quick start
 1. [Install Rust](https://rustup.rs/)
-2. If using a firewall, open UDP ports: 4455, 8700, 4400, 8800 (or others if [`INFERNO_ALT_PORT`](#environment-variables) is specified), 5353. Also, allow incoming UDP traffic from possible transmitters (port numbers are allocated by the OS so we can't be specific here)
+2. If using a firewall, open UDP ports: 4455, 8700, 4400, 8800 (or others if [`INFERNO_ALT_PORT`](#environment-variables) is specified), 5353. Also, allow incoming UDP traffic from possible transmitters (port numbers are allocated by the OS so can't be known beforehand)
 3. <s>If wanting to use anything other than Inferno2pipe,</s> clock synchronization daemon is needed. Inferno is compatible with modified [Statime](https://github.com/pendulum-project/statime):
    * currently, Statime is always needed, even for just capturing audio, but it is not by design and will be fixed
    * `git clone -b inferno-dev https://github.com/teodly/statime`
@@ -73,7 +72,6 @@ This project makes no claim to be either authorized or approved by Audinate.
 5. `cd` to the desired program/library directory
    * simple command line audio recorder: [`Inferno2pipe`](inferno2pipe/README.md)
    * virtual soundcard for ALSA: [`alsa_pcm_inferno`](alsa_pcm_inferno/README.md) - also works with PipeWire, should work with JACK (not tested yet)
-   * <s>virtual soundcard for PipeWire: `inferno_wired` (not maintained)</s>
 6. `cargo build`
 7. Follow the instructions in README of the specific program/library
 
@@ -128,6 +126,8 @@ Please use editor respecting `.editorconfig` (for example, VSCode needs an exten
 * receive clock using a documented protocol: [usrvclock](https://gitlab.com/lumifaza/usrvclock)
 * various internal changes primarily related to allowing the use of external buffers (needed for mmap mode in ALSA plugin)
 * receive multicasts
+* ability to use non-default network ports to allow running multiple instances on a single IP address
+* removed Inferno Wired because the ALSA plugin works well with PipeWire. [This is the last version](https://gitlab.com/lumifaza/inferno/-/blob/3941765700696f545425a5479be25091fda514d4/inferno_wired/src/main.rs) for the curious.
 
 ## 0.2.0
 * audio transmitter
@@ -148,10 +148,8 @@ likely in order they'll be implementated
 
 At this point, Inferno will roughly become alternative to Dante Virtual Soundcard.
 
-* integration with JACK
 * send statistics (clock, latency, signal levels)
 * ability to work as a clock source (PTP leader)
-* ability to use non-default network ports to allow running multiple instances on a single IP address
 * automated integration test that will launch several instances, stream audio data between them and check for its correctness
 * bit-perfect transmitter (currently 32-bit integers are always used internally and conversion to 24-bit or 16-bit adds dither)
 * API: number of channels changeable without device server restart (useful for Dante Via-like operation where transmitters & receivers can be added and removed dynamically)
