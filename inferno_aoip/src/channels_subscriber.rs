@@ -975,10 +975,6 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     return true;
   }
 
-  /* fn get_ring_buffer(&self, local_channel_index: usize) -> (RBInput<Sample, P>, Option<RBOutput<Sample, P>>) {
-
-  } */
-
   async fn scan_flows(&mut self) -> bool {
     let mut destroy_futures_per_remote: BTreeMap<
       SocketAddr,

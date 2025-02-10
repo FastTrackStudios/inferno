@@ -7,6 +7,7 @@ use inferno_aoip::utils::{run_future_in_new_thread, LogAndForget};
 use inferno_aoip::{AtomicSample, Clock, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, RealTimeClockReceiver, Sample, SelfInfoBuilder};
 use lazy_static::lazy_static;
 use libc::{c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN};
+use log::error;
 use tokio::sync::{mpsc, oneshot};
 use std::borrow::BorrowMut;
 use std::collections::VecDeque;
@@ -165,7 +166,9 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         if now_samples_opt.is_some() && this.start_time.is_none() {
             println!("warning: setting start_time in plugin_pointer, not plugin_start");
             this.start_time = Some(now_samples_opt.unwrap() as usize);
-            this.start_time_tx.take().unwrap().send(now_samples_opt.unwrap()).expect("failed to send start timestamp");
+            if let Err(e) = this.start_time_tx.take().unwrap().send(now_samples_opt.unwrap()) {
+                error!("failed to send start timestamp: {e}. tx/rx will not work.");
+            }
         }
         if now_samples_opt.is_some() && this.start_time.is_some() {
             (now_samples_opt.unwrap() as usize).wrapping_sub(this.start_time.unwrap()) as snd_pcm_sframes_t
@@ -211,7 +214,8 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
 
     let channels_areas = snd_pcm_ioplug_mmap_areas(io);
     if channels_areas.is_null() {
-        panic!("snd_pcm_ioplug_mmap_areas returned null, unable to get audio memory addresses");
+        error!("snd_pcm_ioplug_mmap_areas returned null, unable to get audio memory addresses");
+        return -libc::EINVAL;
     }
 
     let bits_per_sample = (8 * size_of::<Sample>()) as u32;
@@ -219,10 +223,12 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     for area in channels_areas {
         println!("got address {:x} with first {}b, step {}b, size {} samples * {} channels", area.addr as usize, area.first, area.step, (*io).buffer_size, channels_areas.len());
         if (area.first % 8) != 0 || (area.step % 8) != 0 {
-            panic!("sample size is not measured in whole bytes, unsupported");
+            error!("sample size is not measured in whole bytes, unsupported");
+            return -libc::EINVAL;
         }
         if (area.first % bits_per_sample) != 0 || (area.step % bits_per_sample) != 0 {
-            panic!("samples not aligned, unsupported");
+            error!("samples not aligned, unsupported");
+            return -libc::EINVAL;
         }
     }
     println!("period size: {}", (*io).period_size);
@@ -237,15 +243,19 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     }).collect();
 
     let mut swparams = std::ptr::null_mut::<snd_pcm_sw_params_t>();
-    if snd_pcm_sw_params_malloc(&mut swparams) != 0 {
-        panic!("snd_pcm_sw_params_malloc failed");
+    let r = snd_pcm_sw_params_malloc(&mut swparams);
+    if r != 0 {
+        error!("snd_pcm_sw_params_malloc failed");
+        return r;
     }
-    let boundary: snd_pcm_uframes_t = if snd_pcm_sw_params_current((*io).pcm, swparams) == 0 {
+    let r = snd_pcm_sw_params_current((*io).pcm, swparams);
+    let boundary: snd_pcm_uframes_t = if r == 0 {
         let mut value = 0;
         snd_pcm_sw_params_get_boundary(swparams, &mut value);
         value
     } else {
-        panic!("snd_pcm_sw_params_current failed");
+        error!("snd_pcm_sw_params_current failed");
+        return r;
     };
     snd_pcm_sw_params_free(swparams);
     assert!(boundary != 0);
@@ -288,12 +298,20 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
                 common.commands_sender.blocking_send(Command::StartTransmitter(args)).unwrap();
             },
             _ => {
-                panic!("unknown stream direction");
+                error!("unknown stream direction");
+                return -libc::EINVAL;
             }
         }
     }
 
-    this.clock_receiver = Some(clock_rx_rx.blocking_recv().expect("no clocks available"));
+
+    this.clock_receiver = match clock_rx_rx.blocking_recv() {
+        Ok(clk) => Some(clk),
+        Err(_) => {
+            error!("no clocks available");
+            return -libc::EINVAL;
+        }
+    };
     this.start_time_tx = Some(start_time_tx);
     if let Some(clock_receiver) = &mut this.clock_receiver {
         if let Some(overlay) = clock_receiver.get() {
@@ -318,7 +336,9 @@ unsafe extern "C" fn plugin_start(io: *mut snd_pcm_ioplug_t) -> c_int {
     let now_samples_opt = this.media_clock.now_in_timebase((*io).rate as u64);
     if now_samples_opt.is_some() && this.start_time.is_none() {
         this.start_time = Some(now_samples_opt.unwrap() as usize);
-        this.start_time_tx.take().unwrap().send(now_samples_opt.unwrap()).expect("failed to send start timestamp");
+        if let Err(e) = this.start_time_tx.take().unwrap().send(now_samples_opt.unwrap()) {
+            error!("failed to send start timestamp: {e}. tx/rx will not work.");
+        }
     }
     0
 }
@@ -351,7 +371,8 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
                 }
             },
             _ => {
-                panic!("unknown stream direction");
+                error!("unknown stream direction");
+                return -libc::EINVAL;
             }
         }
         if (!common.capturing) && (!common.playing) {
@@ -440,22 +461,26 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 
     let r = snd_pcm_ioplug_create(io, name, stream, mode);
     if r < 0 {
-        panic!("snd_pcm_ioplug_create returned {r}");
+        error!("snd_pcm_ioplug_create returned {r}");
+        return r;
     }
 
     let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_FORMAT as i32, SUPPORTED_HW_FORMATS.len() as u32, SUPPORTED_HW_FORMATS.as_ptr());
     if r < 0 {
-        panic!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_FORMAT returned {r}");
+        error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_FORMAT returned {r}");
+        return r;
     }
 
     let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_ACCESS as i32, 2, [SND_PCM_ACCESS_MMAP_INTERLEAVED as u32, SND_PCM_ACCESS_RW_INTERLEAVED as u32].as_ptr()); // FIXME investigate why planar doesn't work
     if r < 0 {
-        panic!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_ACCESS returned {r}");
+        error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_ACCESS returned {r}");
+        return r;
     }
 
     let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_RATE as i32, 1, [(*myio).self_info.sample_rate].as_ptr());
     if r < 0 {
-        panic!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_RATE returned {r}");
+        error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_RATE returned {r}");
+        return r;
     }
 
     let num_channels = match (*io).stream {
@@ -466,7 +491,8 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 
     let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_CHANNELS as i32, 1, [num_channels].as_ptr());
     if r < 0 {
-        panic!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_CHANNELS returned {r}");
+        error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_CHANNELS returned {r}");
+        return r;
     }
 
     let min_samples = 64; // must be power of 2
@@ -475,7 +501,8 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 
     let r = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIOD_BYTES as i32, num_channels*bytes_per_sample*min_samples, num_channels*bytes_per_sample*max_samples);
     if r < 0 {
-        panic!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIOD_BYTES returned {r}");
+        error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIOD_BYTES returned {r}");
+        return r;
     }
 
     let buffer_sizes: Vec<std::os::raw::c_uint> = core::iter::successors(Some(min_samples), |n| {
@@ -489,12 +516,14 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 
     let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_BUFFER_BYTES as i32, buffer_sizes.len() as std::os::raw::c_uint, buffer_sizes.as_ptr());
     if r < 0 {
-        panic!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_BUFFER_BYTES returned {r}");
+        error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_BUFFER_BYTES returned {r}");
+        return r;
     }
 
     let r = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIODS as i32, 1, 8);
     if r < 0 {
-        panic!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIODS returned {r}");
+        error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIODS returned {r}");
+        return r;
     }
 
     *pcmp = (*myio).io.pcm;

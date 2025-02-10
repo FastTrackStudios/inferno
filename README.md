@@ -1,5 +1,7 @@
 # Inferno - unofficial implementation of Dante protocol
 
+[GitLab](https://gitlab.com/lumifaza/inferno) | [GitHub](https://github.com/teodly/inferno) | [Principal author's website](https://info.lumifaza.org/)
+
 Highly experimental for now. I don't recommend using it for serious purposes.
 
 However, chances that it'll break already working Dante network are low.

@@ -213,6 +213,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
         match self.commands_receiver.try_recv() {
           Ok(command) => match command {
             Command::Shutdown => break,
+            // MAYBE TODO: register/deregister appear to be thread safe so maybe they could be moved to non-real-time thread?
             Command::AddSocket { index, mut socket } => {
               debug!("adding socket");
               self.poll.registry().register(&mut socket.socket, mio::Token(index), mio::Interest::READABLE).unwrap();
@@ -322,6 +323,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     channels_count: usize,
     last_packet_time_arc: Arc<AtomicUsize>,
   ) {
+    // TODO: it would be more logical to move socket creation here from channels_subscriber.rs which is already convoluted
     debug!("adding flow receiver local index={local_index}");
     self
       .commands_sender
