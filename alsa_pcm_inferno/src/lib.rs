@@ -4,21 +4,23 @@ use alsa_sys_all::*;
 
 use futures_util::FutureExt;
 use inferno_aoip::utils::{run_future_in_new_thread, LogAndForget};
-use inferno_aoip::{AtomicSample, Clock, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, RealTimeClockReceiver, Sample, SelfInfoBuilder};
+use inferno_aoip::{AtomicSample, Clock, ClockDiff, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, PositionReportDestination, RealTimeClockReceiver, Sample, SelfInfoBuilder};
 use lazy_static::lazy_static;
 use libc::{c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN};
 use log::error;
 use tokio::sync::{mpsc, oneshot};
+use core::slice;
 use std::borrow::BorrowMut;
 use std::collections::VecDeque;
 use std::env;
 use std::num::Wrapping;
 use std::ptr::{null_mut, null};
 use std::mem::zeroed;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{self, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
+use itertools::Itertools;
 
 struct StartArgs {
     channels: Vec<ExternalBufferParameters<Sample>>,
@@ -123,7 +125,7 @@ struct StreamInfo {
 struct MyIOPlug {
     io: snd_pcm_ioplug_t,
     callbacks: snd_pcm_ioplug_callback_t,
-    self_info: DeviceInfo,
+    self_info: DeviceInfo, // TODO: this is needlessly duplicated in both TX and RX instance
     ref_time: Instant,
     stream_info: Option<StreamInfo>,
     buffers_valid: Arc<RwLock<bool>>,
@@ -134,6 +136,9 @@ struct MyIOPlug {
     current_timestamp: Arc<AtomicUsize>,
     on_transfer_eventfd: libc::c_int,
     on_transfer: Box<dyn Fn() + Send + Sync>,
+    last_transfer_buffer_offset: snd_pcm_uframes_t,
+    transfer_offset_add: Wrapping<Clock>,
+    readable_pos_per_channel: Arc<Vec<AtomicUsize>>,
     // TODO refactor multiple Options to single Option<struct>
 }
 
@@ -233,12 +238,19 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     }
     println!("period size: {}", (*io).period_size);
 
-    let channels_buffers = channels_areas.iter().map(|area| {
+    let channels_buffers = channels_areas.iter().enumerate().map(|(ch_index, area)| {
+        let readable_pos_dest = if (*io).stream==SND_PCM_STREAM_CAPTURE {
+            Some(PositionReportDestination::new(this.readable_pos_per_channel.clone(), ch_index))
+        } else {
+            None
+        };
+        
         ExternalBufferParameters::<Sample>::new(
             area.addr.byte_offset((area.first/8) as isize) as *const AtomicSample,
             ((*io).buffer_size as usize) * channels_areas.len() - ((area.first/bits_per_sample) as usize),
             (area.step/bits_per_sample) as usize,
-            this.buffers_valid.clone()
+            this.buffers_valid.clone(),
+            readable_pos_dest
         )
     }).collect();
 
@@ -386,7 +398,49 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
 
 unsafe extern "C" fn plugin_capture_transfer(io: *mut snd_pcm_ioplug_t, areas: *const snd_pcm_channel_area_t, offset: snd_pcm_uframes_t, size: snd_pcm_uframes_t) -> snd_pcm_sframes_t {
     let this = get_private(io);
+    // FIXME: it doesn't work at all and dunno why
+    if offset < this.last_transfer_buffer_offset {
+        // FIXME: strange things may happen if process freezes for a time longer than buffer_size...
+        // maybe this whole zero filling should be handled in flows_rx ???
+        this.transfer_offset_add += (*io).buffer_size as Clock;
+    }
+    this.last_transfer_buffer_offset = offset + size;
+    let offset = (offset as Clock).wrapping_add(this.transfer_offset_add.0);
     let need_samples_until = (offset as Clock).wrapping_add(size as Clock);
+    //println!("transfer: need samples from {offset} until {need_samples_until}");
+    let channels_areas = std::slice::from_raw_parts(areas, (*io).channels as usize);
+    let bits_per_sample = (8 * size_of::<Sample>()) as u32;
+    for (chi, area) in channels_areas.iter().enumerate() {
+        let have_samples = this.readable_pos_per_channel[chi as usize].load(Ordering::Acquire);
+        let diff = (need_samples_until as ClockDiff).wrapping_sub(have_samples as ClockDiff);
+        if diff > 0 {
+            // TODO: DRY with plugin_prepare, or use ringbuffer?
+            let ptr = area.addr.byte_offset((area.first/8) as isize) as *const AtomicSample;
+            let all_length = ((*io).buffer_size as usize) * channels_areas.len() - ((area.first/bits_per_sample) as usize);
+            let stride = (area.step/bits_per_sample) as usize;
+            let samples = slice::from_raw_parts(ptr, all_length);
+            let ch_len = (*io).buffer_size as usize;
+            debug_assert_eq!(ch_len, (all_length+stride-1) / stride);
+            let fill_start = if (have_samples as ClockDiff).wrapping_sub(offset as ClockDiff) < 0 {
+                offset as Clock
+            } else {
+                have_samples as Clock
+            };
+            let fill_end = need_samples_until as Clock;
+            let mut i = fill_start;
+            //let mut index = fill_start.wrapping_mul(stride);
+            //let end_index = need_samples_until.wrapping_mul(stride);
+            if have_samples != 0 {
+                error!("channel index {chi}: no samples available, filling with silence: {fill_start}..{fill_end}");
+            }
+            while i != fill_end {
+                samples[(i % ch_len).wrapping_mul(stride)].store(0, Ordering::Relaxed);
+                i = i.wrapping_add(1);
+            }
+            // TODO: suboptimal, use something like ring_buffer::for_in_ring
+            atomic::fence(Ordering::Release);
+        }
+    }
 
     //println!("plugin_transfer called, size: {:?}", size);
     size as snd_pcm_sframes_t
@@ -444,12 +498,16 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         on_transfer: Box::new(move || {
             libc::write(efd, [1u64].as_ptr() as *const c_void, 8);
         }),
+        last_transfer_buffer_offset: 0,
+        transfer_offset_add: Wrapping(0),
+        readable_pos_per_channel: Arc::new((0..(if stream==SND_PCM_STREAM_CAPTURE { *rx_channels_count } else { 0 })).map(|_|0.into()).collect_vec()),
     }));
 
     let io = &mut (*myio).io;
     io.version = (1<<16) | (0<<8) | 2;
     io.name = PLUGIN_NAME.as_ptr() as *const _;
     io.callback = &(*myio).callbacks;
+    io.flags = SND_PCM_IOPLUG_FLAG_BOUNDARY_WA;
     io.mmap_rw = 1;
 
     // despite ALSA PCM plugin documentation saying that poll_fd is optional,

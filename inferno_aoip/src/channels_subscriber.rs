@@ -13,7 +13,7 @@ use crate::{
   protocol::flows_control::FlowsControlClient,
 };
 
-use crate::ring_buffer::{self, ExternalBuffer, ExternalBufferParameters, OwnedBuffer, ProxyToSamplesBuffer, RBInput, RBOutput};
+use crate::ring_buffer::{self, ExternalBuffer, ExternalBufferParameters, OwnedBuffer, ProxyToSamplesBuffer, RBInput, RBOutput, RingBufferShared};
 
 use atomic::Atomic;
 use futures::{future::join_all, Future, FutureExt};
@@ -149,8 +149,8 @@ impl ChannelsSubscriber {
 
 
 pub trait ChannelsBuffering<P: ProxyToSamplesBuffer> {
-  fn connect_channel(&self, start_time: Clock, rb_output: &mut Option<RBOutput<Sample, P>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, P>>;
-  fn disconnect_channel(&self, channel_index: usize);
+  fn connect_channel(&mut self, start_time: Clock, rb_output: &mut Option<RBOutput<Sample, P>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, P>>;
+  fn disconnect_channel(&mut self, channel_index: usize, flow_index: usize, channel_in_flow: usize, flows_recv: Arc<FlowsReceiver<P>>);
 }
 
 pub struct OwnedBuffering {
@@ -166,7 +166,7 @@ impl OwnedBuffering {
 }
 
 impl ChannelsBuffering<OwnedBuffer<Atomic<Sample>>> for OwnedBuffering {
-  fn connect_channel(&self, start_time: Clock, rb_output: &mut Option<RBOutput<Sample, OwnedBuffer<Atomic<Sample>>>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>> {
+  fn connect_channel(&mut self, start_time: Clock, rb_output: &mut Option<RBOutput<Sample, OwnedBuffer<Atomic<Sample>>>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>> {
     let (sink, source) = if rb_output.is_none() {
       let (sink, source) =
         ring_buffer::new_owned::<Sample>(self.buffer_length, start_time as usize, self.hole_fix_wait);
@@ -181,7 +181,7 @@ impl ChannelsBuffering<OwnedBuffer<Atomic<Sample>>> for OwnedBuffering {
     });
     sink
   }
-  fn disconnect_channel(&self, channel_index: usize) {
+  fn disconnect_channel(&mut self, channel_index: usize, _flow_index: usize, _channel_in_flow: usize, _flows_recv: Arc<FlowsReceiver<OwnedBuffer<Atomic<Sample>>>>) {
     let sc = self.samples_collector.clone();
     tokio::spawn(async move {
       sc.disconnect_channel(channel_index).await;
@@ -192,23 +192,35 @@ impl ChannelsBuffering<OwnedBuffer<Atomic<Sample>>> for OwnedBuffering {
 pub struct ExternalBuffering {
   channels: Vec<ExternalBufferParameters<Sample>>,
   hole_fix_wait: usize,
+  ring_buffers: Vec<Option<Arc<RingBufferShared<Sample, ExternalBuffer<Atomic<Sample>>>>>>,
+  //on_disconnect: Vec<Option<Box<dyn FnOnce(Arc<RingBufferShared<Sample, ExternalBuffer<Atomic<Sample>>>>) -> ()>>>,
 }
 
 impl ExternalBuffering {
   pub fn new(channels: Vec<ExternalBufferParameters<Sample>>, hole_fix_wait: usize) -> Self {
+    let channels_count = channels.len();
     Self {
       channels,
-      hole_fix_wait
+      hole_fix_wait,
+      ring_buffers: (0..channels_count).map(|_|None).collect_vec(),
     }
   }
 }
 
 impl ChannelsBuffering<ExternalBuffer<Atomic<Sample>>> for ExternalBuffering {
-  fn connect_channel(&self, start_time: Clock, rb_output: &mut Option<RBOutput<Sample, ExternalBuffer<Atomic<Sample>>>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, ExternalBuffer<Atomic<Sample>>>> {
-    debug_assert!(rb_output.is_none());
-    Some(ring_buffer::wrap_external_sink(&self.channels[channel_index], start_time as usize, self.hole_fix_wait))
+  fn connect_channel(&mut self, start_time: Clock, rb_output: &mut Option<RBOutput<Sample, ExternalBuffer<Atomic<Sample>>>>, channel_index: usize, _latency_samples: usize) -> Option<RBInput<Sample, ExternalBuffer<Atomic<Sample>>>> {
+    debug_assert!(rb_output.is_none()); // ringbuffer not cached & not reused in this case
+    let rb_input = ring_buffer::wrap_external_sink(&self.channels[channel_index], start_time as usize, self.hole_fix_wait);
+    self.ring_buffers[channel_index] = Some(rb_input.shared().clone());
+    Some(rb_input)
   }
-  fn disconnect_channel(&self, _channel_index: usize) {
+  fn disconnect_channel(&mut self, channel_index: usize, flow_index: usize, channel_in_flow: usize, flows_recv: Arc<FlowsReceiver<ExternalBuffer<Atomic<Sample>>>>) {
+    // TODO: this is a bit illogical, flows_recv.{connect_channel, disconnect_channel} should be in one place
+    if let Some(ringbuf) = self.ring_buffers[channel_index].take() {
+      tokio::spawn(async move {
+        flows_recv.disconnect_channel(flow_index, channel_in_flow, ringbuf).await;
+      });
+    }
   }
 }
 
@@ -358,9 +370,9 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
       .log_and_forget();
   }
   pub async fn unsubscribe(&mut self, local_channel_index: usize, remove_from_info: bool) {
-    self.channels_buffering.disconnect_channel(local_channel_index);
     if let Some(subscription) = &self.channels[local_channel_index] {
       if let Some(remote) = subscription.remote.as_ref() {
+        self.channels_buffering.disconnect_channel(local_channel_index, remote.local_flow_index, remote.channel_in_flow, self.flows_recv.clone());
         match &mut self.flows.lock().unwrap()[remote.local_flow_index] {
           Some(flow) => {
             flow.channels_refcount[remote.channel_in_flow] -= 1;
@@ -375,6 +387,8 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         self.subscriptions_info.write().unwrap()[local_channel_index] = None;
       }
       self.notify_channels_change([local_channel_index]).await;
+    } else {
+      error!("BUG: trying to unsubscribe not subscribed channel index {local_channel_index}");
     }
   }
   pub async fn subscribe(
@@ -1011,6 +1025,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
                         && chsub.remote.as_ref().unwrap().local_flow_index == flow_index
                       {
                         if remove {
+                          let channel_in_flow = chsub.remote.as_ref().unwrap().channel_in_flow;
                           chsub.remote = None;
                           self.needs_resolving = true;
                           self.resolve_now = true;
@@ -1023,7 +1038,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
                             subi.status = SubscriptionStatus::Unresolved;
                             channels_changed.push(chi);
                           }
-                          self.channels_buffering.disconnect_channel(chi);
+                          self.channels_buffering.disconnect_channel(chi, flow_index, channel_in_flow, self.flows_recv.clone());
                         } else if receiving {
                           if let Some(subi) = self.subscriptions_info.write().unwrap()[chi].as_mut()
                           {

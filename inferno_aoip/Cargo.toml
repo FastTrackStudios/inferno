@@ -34,6 +34,7 @@ mio = { version = "1.0.2", features = ["net", "os-ext", "os-poll"] }
 bool_vec = "0.2.1"
 bytemuck = "1.17.1"
 usrvclock = { git = "https://gitlab.com/lumifaza/usrvclock-rs", version = "0.1.0" }
+arrayvec = "0.7.6"
 
 [dependencies.serde]
 version = "1.0.159"

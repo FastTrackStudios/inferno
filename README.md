@@ -102,7 +102,6 @@ This project makes no claim to be either authorized or approved by Audinate.
 * `inferno2pipe` - capture audio, writing interleaved 32-bit integer samples into an Unix named pipe (or a raw file). Helper script for recording to more convenient format is also provided. **Start here if you want to use Inferno for capturing audio without setting up whole audio stack**
 * `alsa_pcm_inferno` - virtual soundcard for ALSA. **Start here if you want functionality similar to DVS**
 * `searchfire` - fork of [Searchlight](https://github.com/WilliamVenner/searchlight) mDNS crate, modified for compatibility with Dante's mDNS
-* `cirb` - Clock-Indexed Ring-Buffer - fork of [`rt-history`](https://github.com/HadrienG2/rt-history) crate with emphasis on allowing reordered incoming packets and clock synchronization
 
 
 # Environment variables
@@ -134,7 +133,7 @@ Please use editor respecting `.editorconfig` (for example, VSCode needs an exten
 ## 0.2.0
 * audio transmitter
 * alpha version of Inferno Wired - virtual audio source & sink for PipeWire
-* receiving clock from [Statime](https://github.com/teowoz/statime) modified for PTPv1 and virtual clock support - Linux-only for now (because CLOCK_TAI is Linux-only)
+* receiving clock from [Statime](https://github.com/teodly/statime) modified for PTPv1 and virtual clock support - Linux-only for now (because CLOCK_TAI is Linux-only)
 * increased receive thread priority to reduce chance of OS UDP input queue overflow
 
 ## 0.1.0
@@ -150,6 +149,7 @@ likely in order they'll be implementated
 
 At this point, Inferno will roughly become alternative to Dante Virtual Soundcard.
 
+* read configuration from sources other then env vars: ALSA plugin parameters, text files - useful for multiple sources & sinks in PipeWire
 * send statistics (clock, latency, signal levels)
 * ability to work as a clock source (PTP leader)
 * automated integration test that will launch several instances, stream audio data between them and check for its correctness
@@ -161,7 +161,7 @@ At this point, Inferno will roughly become alternative to Dante Virtual Soundcar
 
 
 # Design
-* 99% safe Rust (unsafe is required only because PipeWire Rust bindings return raw buffers and because ALSA plugin API doesn't have safe Rust bindings)
+* 99% safe Rust (unsafe is required only because ALSA plugin API doesn't have safe Rust bindings)
 * no external libraries needed, the only dependencies are Rust crates
 
 

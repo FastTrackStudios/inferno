@@ -82,7 +82,7 @@ pub use common::{Sample, Clock, ClockDiff};
 pub use device_info::DeviceInfo;
 pub use device_server::{DeviceServer, SelfInfoBuilder};
 pub use media_clock::{MediaClock, RealTimeClockReceiver};
-pub use ring_buffer::ExternalBufferParameters;
+pub use ring_buffer::{ExternalBufferParameters, PositionReportDestination};
 pub type AtomicSample = atomic::Atomic<Sample>;
 
 pub mod utils {

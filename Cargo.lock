@@ -43,6 +43,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "inferno_aoip",
+ "itertools 0.14.0",
  "lazy_static",
  "libc",
  "log",
@@ -97,6 +98,12 @@ dependencies = [
  "anstyle",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "arrayvec"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
 name = "async-channel"
@@ -199,7 +206,7 @@ dependencies = [
  "bitflags 2.6.0",
  "cexpr",
  "clang-sys",
- "itertools",
+ "itertools 0.12.1",
  "lazy_static",
  "lazycell",
  "log",
@@ -785,6 +792,7 @@ dependencies = [
 name = "inferno_aoip"
 version = "0.3.0"
 dependencies = [
+ "arrayvec",
  "atomic",
  "atomic_enum",
  "atomicbox",
@@ -797,7 +805,7 @@ dependencies = [
  "futures",
  "hex",
  "interprocess",
- "itertools",
+ "itertools 0.12.1",
  "local-ip-address",
  "log",
  "mio",
@@ -861,6 +869,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,7 +908,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]

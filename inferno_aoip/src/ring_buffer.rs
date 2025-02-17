@@ -3,7 +3,7 @@ use std::{marker::PhantomData, slice, sync::{atomic::AtomicUsize, Arc, RwLock}};
 use atomic::{Atomic, Ordering};
 use bool_vec::{boolvec, BoolVec};
 use bytemuck::NoUninit;
-use itertools::Itertools;
+use itertools::{Itertools, Position};
 
 pub fn wrapsub(a: usize, b: usize) -> isize {
   (a as isize).wrapping_sub(b as isize)
@@ -102,7 +102,19 @@ impl<T> ProxyToBuffer<T> for ExternalBuffer<T> {
 impl ProxyToSamplesBuffer for ExternalBuffer<Atomic<Sample>> {
 }
 
-struct RingBufferShared<T, P: ProxyToBuffer<Atomic<T>>> {
+#[derive(Clone)]
+pub struct PositionReportDestination {
+  tab: Arc<Vec<AtomicUsize>>,
+  offset: usize,
+}
+
+impl PositionReportDestination {
+  pub fn new(tab: Arc<Vec<AtomicUsize>>, offset: usize) -> Self {
+    Self { tab, offset }
+  }
+}
+
+pub struct RingBufferShared<T, P: ProxyToBuffer<Atomic<T>>> {
   _t: PhantomData<T>,
   buffer: P,
   stride: usize,
@@ -111,10 +123,12 @@ struct RingBufferShared<T, P: ProxyToBuffer<Atomic<T>>> {
   readable_pos: AtomicUsize,
   writing_pos: AtomicUsize,
   holes_count: AtomicUsize,
+
+  readable_pos_dest: Option<PositionReportDestination>,
 }
 
 impl<T, P: ProxyToBuffer<Atomic<T>>> RingBufferShared<T, P> {
-  fn new(storage: P, stride: usize, start_time: usize) -> Arc<Self> {
+  fn new(storage: P, stride: usize, start_time: usize, readable_pos_dest: Option<PositionReportDestination>) -> Arc<Self> {
     let items_size = (storage.len()+stride-1) / stride;
     Arc::new(RingBufferShared {
       _t: Default::default(),
@@ -124,12 +138,20 @@ impl<T, P: ProxyToBuffer<Atomic<T>>> RingBufferShared<T, P> {
       read_pos: start_time.into(),
       readable_pos: start_time.into(),
       writing_pos: start_time.into(),
-      holes_count: 0.into()
+      holes_count: 0.into(),
+      readable_pos_dest,
     })
   }
+  #[inline(always)]
   fn item_to_buffer_index(&self, i: usize) -> usize {
     // TODO change to more optimized log2 implementation when we're sure that buffer length will always be power of 2
     (i % self.items_size) * self.stride
+  }
+  #[inline(always)]
+  fn commit_readable_pos(&self) {
+    if let Some(dest) = &self.readable_pos_dest {
+      dest.tab[dest.offset].store(self.readable_pos.load(Ordering::Relaxed), Ordering::Release);
+    }
   }
 }
 
@@ -167,7 +189,12 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
   pub fn has_same_ring_buffer(&self, other: &RBInput<T, P>) -> bool {
     Arc::ptr_eq(&self.rb, &other.rb)
   }
-  pub fn write_from_at(&mut self, start_timestamp: usize, mut input: impl ExactSizeIterator<Item = T>) {
+  pub fn shared(&self) -> &Arc<RingBufferShared<T, P>> {
+    &self.rb
+  }
+
+  /// returns the position that can be read using accompanying RBOutput
+  pub fn write_from_at(&mut self, start_timestamp: usize, mut input: impl ExactSizeIterator<Item = T>) -> usize {
     let input_len = input.len();
     assert!(input_len < self.rb.items_size);
     let hole = wrapsub(start_timestamp, self.rb.writing_pos.load(Ordering::Relaxed)) > 0;
@@ -207,6 +234,7 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
           });
           atomic::fence(Ordering::Release);
           self.rb.readable_pos.store(new_readable_pos, Ordering::Release);
+          self.rb.commit_readable_pos();
         }
         //let wrapped_readable_pos = self.rb.readable_pos.load(Ordering::Relaxed) % self.rb.items_size;
         //let wrapped_writing_pos = self.rb.writing_pos.load(Ordering::Relaxed) % self.rb.items_size;
@@ -234,6 +262,8 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
         self.rb.readable_pos.store(self.rb.writing_pos.load(Ordering::Relaxed), Ordering::Release);
       }
     });
+    self.rb.commit_readable_pos();
+    self.rb.readable_pos.load(Ordering::Relaxed)
   }
 }
 
@@ -319,7 +349,7 @@ impl<T: NoUninit, P: ProxyToBuffer<Atomic<T>>> RBOutput<T, P> {
 }
 
 pub fn new_owned<T: Default>(length: usize, start_time: usize, hole_fix_wait: usize) -> (RBInput<T, OwnedBuffer<Atomic<T>>>, RBOutput<T, OwnedBuffer<Atomic<T>>>) {
-  let shared = RingBufferShared::new(OwnedBuffer::<Atomic<T>>::new(length), 1, start_time);
+  let shared = RingBufferShared::new(OwnedBuffer::<Atomic<T>>::new(length), 1, start_time, None);
   (
     RBInput{ rb: shared.clone(), item_ready: boolvec![false; shared.items_size], hole_fix_wait },
     RBOutput{ rb: shared }
@@ -335,6 +365,7 @@ impl<T> ExternalRBInput<T> {
   fn advance(&self, new_position: usize) {
     self.rb.writing_pos.store(new_position, Ordering::Release);
     self.rb.readable_pos.store(new_position.wrapping_sub(self.margin), Ordering::Release);
+    self.rb.commit_readable_pos();
   }
   fn position(&self, clock: usize) -> usize {
     clock
@@ -358,7 +389,7 @@ pub struct ExternalBufferParameters<T> {
   length: usize,
   stride: usize,
   valid: Arc<RwLock<bool>>,
-
+  readable_pos_dest: Option<PositionReportDestination>,
 }
 
 // safety: is guaranteed by lockable valid flag
@@ -367,8 +398,8 @@ unsafe impl<T> Sync for ExternalBufferParameters<T> {}
 
 
 impl<T> ExternalBufferParameters<T> {
-  pub unsafe fn new(ptr: *const Atomic<T>, length: usize, stride: usize, valid: Arc<RwLock<bool>>) -> Self {
-    Self { ptr, length, stride, valid }
+  pub unsafe fn new(ptr: *const Atomic<T>, length: usize, stride: usize, valid: Arc<RwLock<bool>>, readable_pos_dest: Option<PositionReportDestination>) -> Self {
+    Self { ptr, length, stride, valid, readable_pos_dest }
   }
 }
 
@@ -376,13 +407,13 @@ impl<T> ExternalBufferParameters<T> {
 // safety: ExternalBufferParameters::new is unsafe so user acknowledges the dangers when creating the `par` struct
 pub fn wrap_external_source<T: Default>(par: &ExternalBufferParameters<T>, start_time: usize) -> RBOutput<T, ExternalBuffer<Atomic<T>>> {
   let external = unsafe { ExternalBuffer::<Atomic<T>>::new(par.ptr, par.length, par.valid.clone()) };
-  let shared = RingBufferShared::new(external, par.stride, start_time);
+  let shared = RingBufferShared::new(external, par.stride, start_time, par.readable_pos_dest.clone());
   RBOutput{ rb: shared }
 }
 
 pub fn wrap_external_sink<T: Default>(par: &ExternalBufferParameters<T>, start_time: usize, hole_fix_wait: usize) -> RBInput<T, ExternalBuffer<Atomic<T>>> {
   let external = unsafe { ExternalBuffer::<Atomic<T>>::new(par.ptr, par.length, par.valid.clone()) };
-  let shared = RingBufferShared::new(external, par.stride, start_time);
+  let mut shared = RingBufferShared::new(external, par.stride, start_time, par.readable_pos_dest.clone());
   RBInput{ rb: shared.clone(), item_ready: boolvec![false; shared.items_size], hole_fix_wait }
 }
 

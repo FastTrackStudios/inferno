@@ -9,6 +9,8 @@
 3. Add `pcm.` device with type `inferno` to your `.asoundrc` (example [`asoundrc`](asoundrc))
 4. In the application there should be a place where usually device name is entered, e.g. `hw:1`. Enter the name of the device created in your `.asoundrc` there. If you've copied the example `asoundrc`, the name is just `inferno`.
 
+Making Dante<->analog converter at a fraction of the price of an off-the-shelf device, using an SBC and PipeWire, is left as an exercise for the reader.
+
 Application must support 32-bit signed integer audio samples. (Audacity doesn't, but generally using Audacity directly with this plugin is not a good idea) `plug` plugin shipped with ALSA should work as automatic converter for apps that don't support that format (not tested yet).
 
 To change the number of channels, specify the environment variables `INFERNO_RX_CHANNELS` and `INFERNO_TX_CHANNELS`.
