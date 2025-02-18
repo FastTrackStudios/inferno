@@ -4,19 +4,20 @@ use alsa_sys_all::*;
 
 use futures_util::FutureExt;
 use inferno_aoip::utils::{run_future_in_new_thread, LogAndForget};
-use inferno_aoip::{AtomicSample, Clock, ClockDiff, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, PositionReportDestination, RealTimeClockReceiver, Sample, SelfInfoBuilder};
+use inferno_aoip::{AtomicSample, Clock, ClockDiff, DeviceId, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, PositionReportDestination, RealTimeClockReceiver, Sample, SelfInfoBuilder};
 use lazy_static::lazy_static;
-use libc::{c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN};
+use libc::{c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN, R11};
 use log::error;
 use tokio::sync::{mpsc, oneshot};
 use core::slice;
 use std::borrow::BorrowMut;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
+use std::ffi::CStr;
 use std::num::Wrapping;
 use std::ptr::{null_mut, null};
 use std::mem::zeroed;
-use std::sync::atomic::{self, AtomicUsize, Ordering};
+use std::sync::atomic::{self, AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
@@ -38,26 +39,28 @@ enum Command {
     Shutdown,
 }
 
-struct InfernoCommon {
+struct InfernoInstance {
     commands_sender: mpsc::Sender<Command>,
     thread: JoinHandle<()>,
     capturing: bool,
     playing: bool,
 }
 
-const SUPPORTED_HW_FORMATS: [u32; 1] = [SND_PCM_FORMAT_S32 as u32];
 const PLUGIN_NAME: [u8; 23] = *b"Inferno virtual device\0";
+
 lazy_static! {
-    static ref inferno_global: Mutex<Option<InfernoCommon>> = Mutex::new(None);
-    static ref rx_channels_count: usize = env::var("INFERNO_RX_CHANNELS").ok().
+    static ref global_instances: RwLock<BTreeMap<DeviceId, Arc<Mutex<InfernoInstance>>>> = RwLock::new(BTreeMap::new());
+    /* static ref rx_channels_count: usize = env::var("INFERNO_RX_CHANNELS").ok().
         map(|s|s.parse().expect("invalid INFERNO_RX_CHANNELS, must be integer")).unwrap_or(2);
     static ref tx_channels_count: usize = env::var("INFERNO_TX_CHANNELS").ok().
-        map(|s|s.parse().expect("invalid INFERNO_TX_CHANNELS, must be integer")).unwrap_or(2);
+        map(|s|s.parse().expect("invalid INFERNO_TX_CHANNELS, must be integer")).unwrap_or(2); */
+    static ref global_initialized: AtomicBool = false.into();
 }
 
-fn init_common(self_info: DeviceInfo) {
-    let mut common_opt = inferno_global.lock().unwrap();
-    if common_opt.is_none() {
+fn get_or_create_instance(self_info: DeviceInfo) -> Arc<Mutex<InfernoInstance>> {
+    let mut instances_locked = global_instances.write().unwrap();
+    let entry = instances_locked.entry(self_info.factory_device_id);
+    entry.or_insert_with(|| {
         let logenv = env_logger::Env::default().default_filter_or("debug");
         env_logger::builder().parse_env(logenv).format_timestamp_micros().init();
         
@@ -107,13 +110,19 @@ fn init_common(self_info: DeviceInfo) {
             }
             device_server.shutdown().await;
         }.boxed_local());
-        *common_opt = Some(InfernoCommon {
+
+        Arc::new(Mutex::new(InfernoInstance {
             commands_sender,
             thread,
-            capturing: false,
-            playing: false,
-        });
-    }
+            capturing: false.into(),
+            playing: false.into(),
+        }))
+    }).clone()
+}
+
+fn get_instance(self_info: &DeviceInfo) -> Option<Arc<Mutex<InfernoInstance>>> {
+    let instances_locked = global_instances.read().unwrap();
+    instances_locked.get(&self_info.factory_device_id).map(|a|a.clone())
 }
 
 struct StreamInfo {
@@ -138,7 +147,6 @@ struct MyIOPlug {
     on_transfer: Box<dyn Fn() + Send + Sync>,
     last_transfer_buffer_offset: snd_pcm_uframes_t,
     transfer_offset_add: Wrapping<Clock>,
-    readable_pos_per_channel: Arc<Vec<AtomicUsize>>,
     // TODO refactor multiple Options to single Option<struct>
 }
 
@@ -190,6 +198,7 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
     };
 
     if buffered < 0 && ((*io).state == SND_PCM_STATE_RUNNING || (*io).state == SND_PCM_STATE_DRAINING) {
+        // FIXME: will crash here if media clock goes backwards
         let ioplug_avail = snd_pcm_ioplug_avail(io, ptr.try_into().unwrap(), (*io).appl_ptr);
         let ioplug_hw_avail = snd_pcm_ioplug_hw_avail(io, ptr.try_into().unwrap(), (*io).appl_ptr);
         println!("buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}");
@@ -239,18 +248,12 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     println!("period size: {}", (*io).period_size);
 
     let channels_buffers = channels_areas.iter().enumerate().map(|(ch_index, area)| {
-        let readable_pos_dest = if (*io).stream==SND_PCM_STREAM_CAPTURE {
-            Some(PositionReportDestination::new(this.readable_pos_per_channel.clone(), ch_index))
-        } else {
-            None
-        };
-        
         ExternalBufferParameters::<Sample>::new(
             area.addr.byte_offset((area.first/8) as isize) as *const AtomicSample,
             ((*io).buffer_size as usize) * channels_areas.len() - ((area.first/bits_per_sample) as usize),
             (area.step/bits_per_sample) as usize,
             this.buffers_valid.clone(),
-            readable_pos_dest
+            None
         )
     }).collect();
 
@@ -281,10 +284,9 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     let (start_time_tx, start_time_rx) = oneshot::channel::<Clock>();
     let (clock_rx_tx, clock_rx_rx) = oneshot::channel::<RealTimeClockReceiver>();
 
-    init_common(this.self_info.clone());
+    let inferno_instance = get_or_create_instance(this.self_info.clone());
     {
-        let mut common_guard = inferno_global.lock();
-        let common = common_guard.as_mut().unwrap().as_mut().unwrap();
+        let mut common = inferno_instance.lock().unwrap();
         this.start_time_tx = None;
         this.current_timestamp.store(usize::MAX, Ordering::SeqCst);
         let args = StartArgs {
@@ -361,10 +363,9 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
     let this = get_private(io);
     *this.buffers_valid.write().unwrap() = false;
     
-    let mut common_guard = inferno_global.lock();
-    let common_opt = common_guard.as_mut().unwrap();
     // TODO blocking_send inside mutex, risk of deadlock?
-    if let Some(common) = common_opt.as_mut() {
+    if let Some(common_mutex) = get_instance(&this.self_info) {
+        let mut common = common_mutex.lock().unwrap();
         match (*io).stream {
             SND_PCM_STREAM_CAPTURE => {
                 if common.capturing {
@@ -397,51 +398,6 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
 }
 
 unsafe extern "C" fn plugin_capture_transfer(io: *mut snd_pcm_ioplug_t, areas: *const snd_pcm_channel_area_t, offset: snd_pcm_uframes_t, size: snd_pcm_uframes_t) -> snd_pcm_sframes_t {
-    let this = get_private(io);
-    // FIXME: it doesn't work at all and dunno why
-    if offset < this.last_transfer_buffer_offset {
-        // FIXME: strange things may happen if process freezes for a time longer than buffer_size...
-        // maybe this whole zero filling should be handled in flows_rx ???
-        this.transfer_offset_add += (*io).buffer_size as Clock;
-    }
-    this.last_transfer_buffer_offset = offset + size;
-    let offset = (offset as Clock).wrapping_add(this.transfer_offset_add.0);
-    let need_samples_until = (offset as Clock).wrapping_add(size as Clock);
-    //println!("transfer: need samples from {offset} until {need_samples_until}");
-    let channels_areas = std::slice::from_raw_parts(areas, (*io).channels as usize);
-    let bits_per_sample = (8 * size_of::<Sample>()) as u32;
-    for (chi, area) in channels_areas.iter().enumerate() {
-        let have_samples = this.readable_pos_per_channel[chi as usize].load(Ordering::Acquire);
-        let diff = (need_samples_until as ClockDiff).wrapping_sub(have_samples as ClockDiff);
-        if diff > 0 {
-            // TODO: DRY with plugin_prepare, or use ringbuffer?
-            let ptr = area.addr.byte_offset((area.first/8) as isize) as *const AtomicSample;
-            let all_length = ((*io).buffer_size as usize) * channels_areas.len() - ((area.first/bits_per_sample) as usize);
-            let stride = (area.step/bits_per_sample) as usize;
-            let samples = slice::from_raw_parts(ptr, all_length);
-            let ch_len = (*io).buffer_size as usize;
-            debug_assert_eq!(ch_len, (all_length+stride-1) / stride);
-            let fill_start = if (have_samples as ClockDiff).wrapping_sub(offset as ClockDiff) < 0 {
-                offset as Clock
-            } else {
-                have_samples as Clock
-            };
-            let fill_end = need_samples_until as Clock;
-            let mut i = fill_start;
-            //let mut index = fill_start.wrapping_mul(stride);
-            //let end_index = need_samples_until.wrapping_mul(stride);
-            if have_samples != 0 {
-                error!("channel index {chi}: no samples available, filling with silence: {fill_start}..{fill_end}");
-            }
-            while i != fill_end {
-                samples[(i % ch_len).wrapping_mul(stride)].store(0, Ordering::Relaxed);
-                i = i.wrapping_add(1);
-            }
-            // TODO: suboptimal, use something like ring_buffer::for_in_ring
-            atomic::fence(Ordering::Release);
-        }
-    }
-
     //println!("plugin_transfer called, size: {:?}", size);
     size as snd_pcm_sframes_t
 }
@@ -450,10 +406,9 @@ unsafe extern "C" fn plugin_close(io: *mut snd_pcm_ioplug_t) -> c_int {
     println!("plugin_close called");
     let this = get_private(io);
     {
-        let mut common_guard = inferno_global.lock();
-        let common_opt = common_guard.as_mut().unwrap();
         // TODO blocking_send inside mutex, risk of deadlock?
-        if let Some(common) = common_opt.as_mut() {
+        if let Some(common_mutex) = get_instance(&this.self_info) {
+            let common = common_mutex.lock().unwrap();
             if (!common.capturing) && (!common.playing) {
                 common.commands_sender.blocking_send(Command::Shutdown).unwrap();
             }
@@ -466,6 +421,26 @@ unsafe extern "C" fn plugin_close(io: *mut snd_pcm_ioplug_t) -> c_int {
 
 
 unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_char, root: *const snd_config_t, conf: *const snd_config_t, stream: snd_pcm_stream_t, mode: c_int) -> c_int {
+
+    let mut config = BTreeMap::<String, String>::new();
+    let mut pos = snd_config_iterator_first(conf);
+    while pos != snd_config_iterator_end(conf) {
+        let entry = snd_config_iterator_entry(pos);
+        let mut key_container: [*const c_char; 1] = [core::ptr::null()];
+        let r1 = snd_config_get_id(entry, key_container.as_mut_ptr());
+        let mut value_container: [*mut c_char; 1] = [core::ptr::null_mut()];
+        let r2 = snd_config_get_ascii(entry, value_container.as_mut_ptr());
+        if r1==0 && r2==0 && (!key_container[0].is_null()) && (!value_container[0].is_null()) {
+            let key = CStr::from_ptr(key_container[0]).to_str();
+            let value = CStr::from_ptr(value_container[0]).to_str();
+            if key.is_ok() && value.is_ok() {
+                config.insert(key.unwrap().to_owned(), value.unwrap().to_owned());
+            }
+        }
+        pos = snd_config_iterator_next(pos);
+    }
+
+
     let app_name = get_app_name().unwrap_or(std::process::id().to_string());
 
     let efd = eventfd(0, EFD_CLOEXEC);
@@ -479,13 +454,13 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         ..zeroed()
     };
     if stream==SND_PCM_STREAM_CAPTURE {
-        callbacks.transfer = Some(plugin_capture_transfer);
+        //callbacks.transfer = Some(plugin_capture_transfer); // TODO
     }
 
     let myio = Box::into_raw(Box::new(MyIOPlug {
         io: zeroed(),
         callbacks,
-        self_info: DeviceInfo::new_self(&format!("{app_name} via Inferno-AoIP"), &app_name, None).make_rx_channels(*rx_channels_count).make_tx_channels(*tx_channels_count),
+        self_info: DeviceInfo::new_self(&format!("{app_name} via Inferno-AoIP"), &app_name, None, config),
         ref_time: Instant::now(),
         stream_info: None,
         buffers_valid: Arc::new(RwLock::new(false)),
@@ -500,7 +475,6 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         }),
         last_transfer_buffer_offset: 0,
         transfer_offset_add: Wrapping(0),
-        readable_pos_per_channel: Arc::new((0..(if stream==SND_PCM_STREAM_CAPTURE { *rx_channels_count } else { 0 })).map(|_|0.into()).collect_vec()),
     }));
 
     let io = &mut (*myio).io;
@@ -523,7 +497,7 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         return r;
     }
 
-    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_FORMAT as i32, SUPPORTED_HW_FORMATS.len() as u32, SUPPORTED_HW_FORMATS.as_ptr());
+    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_FORMAT as i32, 1, [SND_PCM_FORMAT_S32 as u32].as_ptr());
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_FORMAT returned {r}");
         return r;
@@ -542,8 +516,8 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
     }
 
     let num_channels = match (*io).stream {
-        SND_PCM_STREAM_CAPTURE => *rx_channels_count,
-        SND_PCM_STREAM_PLAYBACK => *tx_channels_count,
+        SND_PCM_STREAM_CAPTURE => (*myio).self_info.rx_channels.len(),
+        SND_PCM_STREAM_PLAYBACK => (*myio).self_info.tx_channels.len(),
         _ => 0
     } as u32;
 

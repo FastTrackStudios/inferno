@@ -1,0 +1,6 @@
+#!/bin/bash
+
+systemctl --user restart pipewire.service
+./start_pipewire_sink
+./start_pipewire_source
+journalctl --user -eu pipewire.service

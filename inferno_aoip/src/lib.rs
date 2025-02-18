@@ -79,7 +79,7 @@ mod state_storage;
 mod thread_utils;
 
 pub use common::{Sample, Clock, ClockDiff};
-pub use device_info::DeviceInfo;
+pub use device_info::*;
 pub use device_server::{DeviceServer, SelfInfoBuilder};
 pub use media_clock::{MediaClock, RealTimeClockReceiver};
 pub use ring_buffer::{ExternalBufferParameters, PositionReportDestination};

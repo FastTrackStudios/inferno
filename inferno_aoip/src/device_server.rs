@@ -16,7 +16,7 @@ use tokio::sync::broadcast::Receiver;
 use tokio::task::JoinHandle;
 use usrvclock::ClockOverlay;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::Write;
 use std::mem::size_of;
@@ -39,16 +39,29 @@ use crate::protocol::flows_control::PORT as FLOWS_CONTROL_PORT;
 use crate::protocol::mcast::INFO_REQUEST_PORT as INFO_REQUEST_PORT;
 
 pub trait SelfInfoBuilder {
-  fn new_self(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr>) -> DeviceInfo;
+  fn new_self(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr>, settings: BTreeMap<String, String>) -> DeviceInfo;
   fn make_rx_channels(self, count: usize) -> DeviceInfo;
   fn make_tx_channels(self, count: usize) -> DeviceInfo;
 }
 
 impl SelfInfoBuilder for DeviceInfo {
-  fn new_self(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr>) -> DeviceInfo {
+  fn new_self(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr>, in_settings: BTreeMap<String, String>) -> DeviceInfo {
+    // TODO: change expect to non-fatal errors, with current approach an app using ALSA plugin may be crashed for a bening reason
+
+    // convert all settings keys to upper case:
+    let mut settings: BTreeMap<String, String> = in_settings.into_iter().map(|(k, v)|(k.to_ascii_uppercase(), v)).collect();
+    
+    // add settings from env vars if not already set:
+    env::vars().for_each(|(env_key, env_value)| {
+      if let Some(key) = env_key.strip_prefix("INFERNO_") {
+        let key = key.to_ascii_uppercase();
+        settings.entry(key).or_insert(env_value);
+      }
+    });
+
     let my_ipv4 = my_ip.or_else(||
-      env::var("INFERNO_BIND_IP").ok().map(|ipstr|
-        ipstr.parse().expect("invalid IP in env var INFERNO_BIND_IP")
+      settings.get("BIND_IP").map(|ipstr|
+        ipstr.parse().expect("invalid IP in setting BIND_IP")
       )
     ).unwrap_or_else(||
       match local_ip_address::local_ip().expect("unknown local IP, cannot continue") {
@@ -57,19 +70,19 @@ impl SelfInfoBuilder for DeviceInfo {
       }
     );
     let mut devid = [0u8; 8];
-    env::var("INFERNO_DEVICE_ID").ok().map(|idstr| {
-      hex::decode_to_slice(idstr, &mut devid).expect("invalid INFERNO_DEVICE_ID env var, should contain hex data");
+    settings.get("DEVICE_ID").map(|idstr| {
+      hex::decode_to_slice(idstr, &mut devid).expect("invalid DEVICE_ID, should contain hex data");
     }).unwrap_or_else(|| {
       devid[2..6].copy_from_slice(&my_ipv4.octets());
     });
 
     // TODO make hostname and sample rate configurable from DC
-    let friendly_hostname = env::var("INFERNO_NAME").ok().unwrap_or_else(||
+    let friendly_hostname = settings.get("NAME").map(|s|s.clone()).unwrap_or_else(||
       format!("{app_name} {}", hex::encode(&my_ipv4.octets()))
     );
 
-    let sample_rate = env::var("INFERNO_SAMPLE_RATE").ok().
-      map(|s|s.parse().expect("invalid INFERNO_SAMPLE_RATE, must be integer")).unwrap_or(48000);
+    let sample_rate = settings.get("SAMPLE_RATE").
+      map(|s|s.parse().expect("invalid SAMPLE_RATE, must be integer")).unwrap_or(48000);
 
     let mut result = DeviceInfo {
       ip_address: my_ipv4,
@@ -95,15 +108,24 @@ impl SelfInfoBuilder for DeviceInfo {
       info_request_port: INFO_REQUEST_PORT,
     };
 
-    if let Some(process_id) = env::var("INFERNO_PROCESS_ID").ok().map(|s|s.parse().expect("INFERNO_PROCESS_ID must be u16")) {
+    if let Some(process_id) = settings.get("PROCESS_ID").map(|s|s.parse().expect("PROCESS_ID must be u16")) {
       result.process_id = process_id;
+      result.factory_device_id[6..8].copy_from_slice(&process_id.to_be_bytes());
     }
 
-    if let Some(altport) = env::var("INFERNO_ALT_PORT").ok().map(|s|s.parse().expect("INFERNO_ALT_PORT must be u16")) {
+    if let Some(altport) = settings.get("ALT_PORT").map(|s|s.parse().expect("ALT_PORT must be u16")) {
       result.arc_port = altport;
       result.cmc_port = altport+1;
       result.flows_control_port = altport+2;
       result.info_request_port = altport+3;
+    }
+
+    // the following should be harmless, as the application still has the chance to overwrite it
+    if let Some(count) = settings.get("RX_CHANNELS").map(|s|s.parse().expect("number of channels must be u16")) {
+      result = result.make_rx_channels(count);
+    }
+    if let Some(count) = settings.get("TX_CHANNELS").map(|s|s.parse().expect("number of channels must be u16")) {
+      result = result.make_tx_channels(count);
     }
 
     result
@@ -171,7 +193,7 @@ impl DeviceServer {
         shdn_recv1,
       )),
       tokio::spawn(crate::cmc_server::run_server(self_info.clone(), shdn_recv2)),
-      tokio::spawn(crate::info_mcast_server::run_server(self_info.clone(), mcast_rx, shdn_recv3)),
+      tokio::spawn(crate::info_mcast_server::run_server(self_info.clone(), mcast_rx, shared_media_clock.clone(), shdn_recv3)),
     ]);
 
     info!("all common tasks spawned");

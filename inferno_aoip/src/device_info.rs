@@ -6,6 +6,8 @@ pub struct Channel {
   pub friendly_name: String,
 }
 
+pub type DeviceId = [u8; 8];
+
 #[derive(Clone)]
 pub struct DeviceInfo {
   pub ip_address: Ipv4Addr,
@@ -13,7 +15,7 @@ pub struct DeviceInfo {
   pub manufacturer: String,
   pub model_name: String,
   pub model_number: String, // _000000000000000b
-  pub factory_device_id: [u8; 8],
+  pub factory_device_id: DeviceId,
   pub process_id: u16,
   pub vendor_string: String,
   pub friendly_hostname: String, // TODO limit length to 31, otherwise DC ignores the device

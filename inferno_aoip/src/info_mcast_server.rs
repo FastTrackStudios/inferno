@@ -2,12 +2,15 @@ use crate::common::*;
 use crate::byte_utils::*;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::mcast::make_packet;
+use crate::MediaClock;
 use crate::{byte_utils::write_str_to_buffer, device_info::DeviceInfo};
+use std::sync::RwLock;
 use std::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
   sync::Arc,
   time::Duration,
 };
+use itertools::Itertools;
 use tokio::time::interval;
 use tokio::{
   select,
@@ -35,10 +38,11 @@ struct Multicaster<'s> {
   device_info_destination: SocketAddr,
   heartbeat_destination: SocketAddr,
   send_buffer: [u8; SEND_BUFFER_SIZE],
+  clock: Arc<RwLock<MediaClock>>,
 }
 
 impl<'s> Multicaster<'s> {
-  pub fn new(self_info: &'s DeviceInfo, server: UdpSocketWrapper) -> Multicaster {
+  pub fn new(self_info: &'s DeviceInfo, server: UdpSocketWrapper, clock: Arc<RwLock<MediaClock>>) -> Multicaster {
     let patch_version = env!("CARGO_PKG_VERSION_PATCH").parse::<u16>().unwrap();
     let mut r = Multicaster {
       self_info,
@@ -61,6 +65,7 @@ impl<'s> Multicaster<'s> {
         DST_PORT_HEARTBEAT,
       ),
       send_buffer: [0; SEND_BUFFER_SIZE],
+      clock,
     };
     write_str_to_buffer(&mut r.vendor, 0, 8, &self_info.vendor_string);
     return r;
@@ -136,33 +141,25 @@ impl<'s> Multicaster<'s> {
 
   async fn send_heartbeat(&mut self) {
     let ctr = self.seqnum;
-    let content = [
-      /*len, 2B:*/0x00, 0x10,
-      /*type, 2B:*/0x80, 0x01,
-      0x00, 0x04, 0x00, 0x04,
-      H(ctr), L(ctr), 0x00, 0x00, /*freq offset, in 1e-9 (ppm*1000), 4B: */ 0, 0, 0, 0,
-      
-      /*0x00, 0x24, 0x80, 0x00, 0x00, 0x04, 0x00, 0x04,
-      H(ctr), L(ctr), 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
-      0x00, 0x01, 0x00, 0x10, 0, 0, 0, 0,
-      0, 0, 0, 0, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00,
-      
-      0x00, 0x1c, 0x80, 0x02, 0x00, 0x04, 0x00, 0x10,
-      H(ctr), L(ctr), 0x00, 0x00, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0,*/
-      
-      /*0x00, 0x20, 0x80, 0x03, 0x00, 0x04, 0x00, 0x14,
-      H(ctr), L(ctr), 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
-      0x00, /*0x18*/0, 0x00, 0x00, 0x00, 0x00, 0xbb, 0x80,
-      0x00, 0x00, 0x00, /*0x14*/0, 0x00, 0x00, 0x00, 0x00,*/
-      
-      /*0x00, 0x1c, 0x80, 0x04, 0x00, 0x04, 0x00, 0x10,
-      H(ctr), L(ctr), 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
-      0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0*/
-    ];
+    let freq_offset_section = self.clock.read().unwrap().get_overlay().as_ref().and_then(|clkovl| {
+      let freq_offset_f = (clkovl.freq_scale * 1_000_000_000f64).round();
+      if i32::MIN as f64 <= freq_offset_f && freq_offset_f <= i32::MAX as f64 {
+        let freq_offset = freq_offset_f as i32;
+        debug!("freq offset {freq_offset_f} {freq_offset}");
+        let mut data = [
+          /*len, 2B:*/0x00, 0x10,
+          /*type, 2B:*/0x80, 0x01,
+          0x00, 0x04, 0x00, 0x04,
+          H(ctr), L(ctr), 0x00, 0x00, /*freq offset, in 1e-9 (ppm*1000), 4B: */ 0, 0, 0, 0
+        ];
+        data[12..16].copy_from_slice(&freq_offset.to_be_bytes());
+        Some(data)
+      } else {
+        None
+      }
+    });
+    let content = [freq_offset_section].into_iter().flatten().collect_vec().concat();
+    
     self
       .send(
         self.heartbeat_destination,
@@ -177,10 +174,11 @@ impl<'s> Multicaster<'s> {
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
   mut rx: mpsc::Receiver<MulticastMessage>,
+  clock: Arc<RwLock<MediaClock>>,
   shutdown: BroadcastReceiver<()>,
 ) {
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.info_request_port, shutdown).await;
-  let mut mcaster = Multicaster::new(self_info.as_ref(), server);
+  let mut mcaster = Multicaster::new(self_info.as_ref(), server, clock);
   mcaster.send_board_info().await;
   mcaster.send_product_info().await;
   let mut heartbeat_interval = interval(Duration::from_secs(1));

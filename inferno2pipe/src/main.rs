@@ -38,7 +38,7 @@ async fn main() {
 
   let args = Args::parse();
 
-  let self_info = DeviceInfo::new_self("Inferno2pipe", "Inferno2pipe", None).make_rx_channels(args.channels_count);
+  let self_info = DeviceInfo::new_self("Inferno2pipe", "Inferno2pipe", None, Default::default()).make_rx_channels(args.channels_count);
 
   let mut output_file = File::create(args.output).unwrap();
   let mut buffer: Vec<u8> =
