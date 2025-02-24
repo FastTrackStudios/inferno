@@ -119,7 +119,6 @@ pub struct RingBufferShared<T, P: ProxyToBuffer<Atomic<T>>> {
   buffer: P,
   stride: usize,
   items_size: usize,
-  read_pos: AtomicUsize, // TODO remove
   readable_pos: AtomicUsize,
   writing_pos: AtomicUsize,
   holes_count: AtomicUsize,
@@ -135,7 +134,6 @@ impl<T, P: ProxyToBuffer<Atomic<T>>> RingBufferShared<T, P> {
       buffer: storage,
       stride,
       items_size,
-      read_pos: start_time.into(),
       readable_pos: start_time.into(),
       writing_pos: start_time.into(),
       holes_count: 0.into(),
@@ -152,6 +150,12 @@ impl<T, P: ProxyToBuffer<Atomic<T>>> RingBufferShared<T, P> {
     if let Some(dest) = &self.readable_pos_dest {
       dest.tab[dest.offset].store(self.readable_pos.load(Ordering::Relaxed), Ordering::Release);
     }
+  }
+
+  pub fn reset(&self, start_time: usize) {
+    self.writing_pos.store(start_time, Ordering::Relaxed);
+    self.readable_pos.store(start_time, Ordering::Relaxed);
+    atomic::fence(Ordering::SeqCst);
   }
 }
 
@@ -183,12 +187,20 @@ pub struct RBInput<T, P: ProxyToBuffer<Atomic<T>>> {
 }
 
 impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
+  pub fn new(shared: Arc<RingBufferShared<T, P>>, hole_fix_wait: usize) -> Self {
+    let items_size = shared.items_size;
+    Self { rb: shared, item_ready: boolvec![false; items_size], hole_fix_wait }
+  }
+
+  #[inline(always)]
   pub fn ring_buffer_size(&self) -> usize {
     self.rb.items_size
   }
+  #[inline(always)]
   pub fn has_same_ring_buffer(&self, other: &RBInput<T, P>) -> bool {
     Arc::ptr_eq(&self.rb, &other.rb)
   }
+  #[inline(always)]
   pub fn shared(&self) -> &Arc<RingBufferShared<T, P>> {
     &self.rb
   }
@@ -197,73 +209,113 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
   pub fn write_from_at(&mut self, start_timestamp: usize, mut input: impl ExactSizeIterator<Item = T>) -> usize {
     let input_len = input.len();
     assert!(input_len < self.rb.items_size);
-    let hole = wrapsub(start_timestamp, self.rb.writing_pos.load(Ordering::Relaxed)) > 0;
-    //let wrapped_start_ts = start_timestamp % self.rb.items_size;
+
+    // Do we have a new hole?
+    let mut hole = wrapsub(start_timestamp, self.rb.writing_pos.load(Ordering::Relaxed)) > 0;
     if hole {
-      //let wrapped_writing_pos = self.rb.writing_pos.load(Ordering::Relaxed) % self.rb.items_size;
+      // Mark it appropriately.
       for_in_ring(self.rb.items_size, self.rb.writing_pos.load(Ordering::Relaxed), start_timestamp, |i| {
         self.item_ready.set(i, false);
       });
     }
-    // FIXME wrapping_add % items_size may result in unexpected behaviour if items_size is not power of 2
-    // TODO ensure that items_size is power of 2
+
+    // Did we have a hole before current invocation?
+    hole |= (self.rb.readable_pos.load(Ordering::Relaxed) != self.rb.writing_pos.load(Ordering::Relaxed));
+
+    // FIXME: wrapping_add % items_size may result in unexpected behaviour if items_size is not power of 2
+    // TODO: ensure that items_size is power of 2
     let end_ts = start_timestamp.wrapping_add(input_len);
-    //let wrapped_end_ts = end_ts % self.rb.items_size;
 
+    // Update writing_pos to let RBOutput know that that we're going to write some items
+    // but make sure we don't go back in time when fixing a hole
+    if wrapsub(end_ts, self.rb.writing_pos.load(Ordering::Relaxed)) > 0 {
+      self.rb.writing_pos.store(end_ts, Ordering::SeqCst);
+    }
+
+    // Write the items:
     self.rb.buffer.map(|buffer| {
-      let mut hole_in_past = self.rb.readable_pos.load(Ordering::Relaxed) != self.rb.writing_pos.load(Ordering::Relaxed);
-
-      if wrapsub(end_ts, self.rb.writing_pos.load(Ordering::Relaxed)) > 0 {
-        self.rb.writing_pos.store(end_ts, Ordering::Release);
-      }
       for_in_ring(self.rb.items_size, start_timestamp, end_ts, |i| {
         //debug!("writing to RB index {i}");
         buffer[i * self.rb.stride].store(input.next().unwrap(), Ordering::Relaxed);
         self.item_ready.set(i, true);
       });
-      atomic::fence(Ordering::Release);
-
-      if hole_in_past {
-        if self.rb.writing_pos.load(Ordering::Relaxed).wrapping_sub(self.rb.readable_pos.load(Ordering::Relaxed)) > self.hole_fix_wait {
-          self.rb.holes_count.fetch_add(1, Ordering::Release);
-          let new_readable_pos = self.rb.writing_pos.load(Ordering::Relaxed).wrapping_sub(self.hole_fix_wait);
-          for_in_ring(self.rb.items_size, self.rb.readable_pos.load(Ordering::Relaxed), new_readable_pos, |i| {
-            if !self.item_ready.get(i).unwrap() {
-              buffer[i * self.rb.stride].store(T::default(), Ordering::Relaxed);
-            }
-          });
-          atomic::fence(Ordering::Release);
-          self.rb.readable_pos.store(new_readable_pos, Ordering::Release);
-          self.rb.commit_readable_pos();
-        }
-        //let wrapped_readable_pos = self.rb.readable_pos.load(Ordering::Relaxed) % self.rb.items_size;
-        //let wrapped_writing_pos = self.rb.writing_pos.load(Ordering::Relaxed) % self.rb.items_size;
-        let mut ready = true;
-        let mut new_write_pos = self.rb.readable_pos.load(Ordering::Relaxed);
-        for_in_ring(self.rb.items_size, self.rb.readable_pos.load(Ordering::Relaxed), self.rb.writing_pos.load(Ordering::Relaxed), |i| {
-          if !ready { return; }
-          if self.item_ready.get(i).unwrap() {
-            new_write_pos += 1;
-          } else {
-            ready = false;
-          }
-        });
-        if ready {
-          hole_in_past = false;
-        }
-        self.rb.readable_pos.store(new_write_pos, Ordering::Release);
-      }
-      let new_writing_pos = start_timestamp.wrapping_add(input_len);
-      if wrapsub(new_writing_pos, self.rb.writing_pos.load(Ordering::Relaxed) /* really? */) > 0 {
-        self.rb.writing_pos.store(new_writing_pos, Ordering::Release);
-      }
-      if !(hole || hole_in_past) {
-        // inform the reader(s) that new data is readable
-        self.rb.readable_pos.store(self.rb.writing_pos.load(Ordering::Relaxed), Ordering::Release);
-      }
+      atomic::fence(Ordering::Release); // TODO: really needed? won't readable_pos.store(Ordering::Release) suffice?
     });
+
+    // Inform the RBOutput that new data is readable
+    // but do it only if there are no holes
+    if !hole {
+      self.rb.readable_pos.store(self.rb.writing_pos.load(Ordering::Relaxed), Ordering::Release);
+    }
+    
+    // If there was a hole, close (write Default to) too old items
+    if hole {
+      self.close_items_until_internal(self.rb.writing_pos.load(Ordering::Relaxed).wrapping_sub(self.hole_fix_wait), self.rb.writing_pos.load(Ordering::Relaxed));
+    }
+
     self.rb.commit_readable_pos();
     self.rb.readable_pos.load(Ordering::Relaxed)
+  }
+
+  fn close_items_until_internal(&self, close_until_pos: usize, check_until_pos: usize) {
+    // Put default values in any holes in readable_pos..close_until_pos range:
+    if wrapsub(close_until_pos, self.rb.readable_pos.load(Ordering::Relaxed)) > 0 {
+      let mut hole = false;
+      self.rb.buffer.map(|buffer| {
+        for_in_ring(self.rb.items_size, self.rb.readable_pos.load(Ordering::Relaxed), close_until_pos, |i| {
+          if !self.item_ready.get(i).unwrap() {
+            hole = true;
+            buffer[i * self.rb.stride].store(T::default(), Ordering::Relaxed);
+          }
+        });
+      });
+      if hole {
+        self.rb.holes_count.fetch_add(1, Ordering::Release);
+      }
+      atomic::fence(Ordering::Release); // TODO: really needed? won't readable_pos.store(Ordering::Release) suffice?
+      self.rb.readable_pos.store(close_until_pos, Ordering::Release);
+    }
+
+    // Check for fixed holes and update readable_pos accordingly:
+    if wrapsub(check_until_pos, self.rb.readable_pos.load(Ordering::Relaxed)) > 0 {
+      let mut ready = true;
+      let mut new_readable_pos = self.rb.readable_pos.load(Ordering::Relaxed);
+      for_in_ring(self.rb.items_size, self.rb.readable_pos.load(Ordering::Relaxed), check_until_pos, |i| {
+        if !ready { return; }
+        if self.item_ready.get(i).unwrap() {
+          new_readable_pos += 1;
+        } else {
+          ready = false;
+        }
+      });
+      self.rb.readable_pos.store(new_readable_pos, Ordering::Release);
+    }
+    
+  }
+
+  pub fn close_items_until(&self, mut until_pos: usize) {
+    let writing_pos = self.rb.writing_pos.load(Ordering::Relaxed);
+    //debug!("writing_pos {writing_pos}, until_pos {until_pos}");
+    let need_until_pos = until_pos;
+    if wrapsub(until_pos, writing_pos) > 0 {
+      until_pos = writing_pos;
+    }
+
+    self.close_items_until_internal(until_pos, until_pos);
+
+    // If closing not-yet-touched items was requested, do it:
+    if need_until_pos != until_pos {
+      self.rb.writing_pos.store(need_until_pos, Ordering::SeqCst);
+      //debug!("storing defaults {until_pos}..{need_until_pos}");
+      self.rb.buffer.map(|buffer| {
+        for_in_ring(self.rb.items_size, until_pos, need_until_pos, |i| {
+          buffer[i * self.rb.stride].store(T::default(), Ordering::Relaxed);
+        })
+      });
+      self.rb.readable_pos.store(need_until_pos, Ordering::Release);
+    }
+
+    self.rb.commit_readable_pos();
   }
 }
 
@@ -340,8 +392,8 @@ impl<T: NoUninit, P: ProxyToBuffer<Atomic<T>>> RBOutput<T, P> {
     ReadResult { useful_start_index: 0, useful_end_index: output_len }
   }
 
-  pub fn read_done(&self, until: usize) {
-    self.rb.read_pos.store(until, Ordering::Release);
+  pub fn read_done(&self, _until: usize) {
+    //self.rb.read_pos.store(until, Ordering::Release);
   }
   pub fn holes_count(&self) -> usize {
     self.rb.holes_count.load(Ordering::Acquire)
@@ -405,18 +457,20 @@ impl<T> ExternalBufferParameters<T> {
 
 
 // safety: ExternalBufferParameters::new is unsafe so user acknowledges the dangers when creating the `par` struct
-pub fn wrap_external_source<T: Default>(par: &ExternalBufferParameters<T>, start_time: usize) -> RBOutput<T, ExternalBuffer<Atomic<T>>> {
+pub fn shared_from_external<T: Default>(par: &ExternalBufferParameters<T>, start_time: usize) -> Arc<RingBufferShared<T, ExternalBuffer<Atomic<T>>>> {
   let external = unsafe { ExternalBuffer::<Atomic<T>>::new(par.ptr, par.length, par.valid.clone()) };
-  let shared = RingBufferShared::new(external, par.stride, start_time, par.readable_pos_dest.clone());
-  RBOutput{ rb: shared }
+  RingBufferShared::new(external, par.stride, start_time, par.readable_pos_dest.clone())
+}
+
+pub fn wrap_external_source<T: Default>(par: &ExternalBufferParameters<T>, start_time: usize) -> RBOutput<T, ExternalBuffer<Atomic<T>>> {
+  RBOutput{ rb: shared_from_external(par, start_time) }
 }
 
 pub fn wrap_external_sink<T: Default>(par: &ExternalBufferParameters<T>, start_time: usize, hole_fix_wait: usize) -> RBInput<T, ExternalBuffer<Atomic<T>>> {
-  let external = unsafe { ExternalBuffer::<Atomic<T>>::new(par.ptr, par.length, par.valid.clone()) };
-  let mut shared = RingBufferShared::new(external, par.stride, start_time, par.readable_pos_dest.clone());
-  RBInput{ rb: shared.clone(), item_ready: boolvec![false; shared.items_size], hole_fix_wait }
+  let shared = shared_from_external(par, start_time);
+  let items_size = shared.items_size;
+  RBInput{ rb: shared, item_ready: boolvec![false; items_size], hole_fix_wait }
 }
-
 
 
 #[cfg(test)]
@@ -449,9 +503,8 @@ mod tests {
       reader.join().unwrap();
   }
 
-  #[test]
-  fn test_non_sequential_write_single_read() {
-      let (mut input, output) = new_owned(16, 0, 4);
+  fn non_sequential_write_single_read(wait: usize, expected: Vec<i32>) {
+      let (mut input, output) = new_owned(16, 0, wait);
 
       let barrier = Arc::new(Barrier::new(2));
       let barrier_writer = barrier.clone();
@@ -471,7 +524,7 @@ mod tests {
                   thread::yield_now();
               }
           }
-          assert_eq!(read_values, (0..8).collect::<Vec<_>>());
+          assert_eq!(read_values, expected);
       });
 
       writer.join().unwrap();
@@ -479,8 +532,17 @@ mod tests {
   }
 
   #[test]
+  fn test_non_sequential_write_single_read() {
+    //non_sequential_write_single_read(3, vec![0, 0, 0, 0, 4, 5, 6, 7]);
+    //non_sequential_write_single_read(4, (0..8).collect::<Vec<_>>()); // TODO: not critical but would be nice
+
+    //non_sequential_write_single_read(6, vec![0, 0, 2, 3, 4, 5, 6, 7]); // TODO: race condition
+    non_sequential_write_single_read(8, (0..8).collect::<Vec<_>>());
+  }
+
+  #[test]
   fn test_fixed_hole_single_read() {
-      let (mut input, output) = new_owned(16, 0, 4);
+      let (mut input, output) = new_owned(16, 0, 6);
 
       let barrier = Arc::new(Barrier::new(2));
       let barrier_writer = barrier.clone();
@@ -508,6 +570,46 @@ mod tests {
       writer.join().unwrap();
       reader.join().unwrap();
   }
+
+
+  #[test]
+  fn test_too_large_hole_single_read() {
+      let (mut input, output) = new_owned(16, 0, 3);
+
+      let barrier = Arc::new(Barrier::new(2));
+      let barrier_writer = barrier.clone();
+      let barrier_reader = barrier.clone();
+
+      let writer = thread::spawn(move || {
+          input.write_from_at(0, vec![-1; 8].into_iter());
+          input.write_from_at(8, vec![-1; 8].into_iter());
+          input.write_from_at(16, (0..2).map(|x| x as i32)); // write 0, 1
+          input.write_from_at(16+4, (4..8).map(|x| x as i32)); // write 4, 5, 6, 7
+          thread::sleep(std::time::Duration::from_millis(100));
+          //input.write_from_at(16+8, [].into_iter());
+          // TODO: what if the following happens? (data arrives too late and breaks something)
+          //input.write_from_at(2, (2..4).map(|x| x as i32)); // write 2, 3 to fix the hole
+          barrier_writer.wait();
+      });
+
+      let reader = thread::spawn(move || {
+          barrier_reader.wait();
+          let mut read_values = vec![0; 8];
+          for i in 0..8 {
+              while output.read_at(i+16, &mut read_values[i..i+1]) != (ReadResult{useful_start_index: 0, useful_end_index: 1}) {
+                  thread::yield_now();
+              }
+          }
+          let mut expected = (0..8).collect::<Vec<_>>();
+          expected[2] = 0;
+          expected[3] = 0;
+          assert_eq!(read_values, expected);
+      });
+
+      writer.join().unwrap();
+      reader.join().unwrap();
+  }
+
 
   #[test]
   fn test_write_read() {

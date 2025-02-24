@@ -92,6 +92,7 @@ impl ChannelsSubscriber {
     mcast: mpsc::Sender<MulticastMessage>,
     channels_buffering: B,
     state_storage: Arc<StateStorage>,
+    start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
     ref_instant: Instant,
   ) -> (Self, Pin<Box<dyn Future<Output = ()> + Send + 'static>>) {
     let (tx, rx) = mpsc::channel(100);
@@ -111,7 +112,7 @@ impl ChannelsSubscriber {
       state_storage,
       ref_instant,
     );
-    return (r, async move { internal.run().await }.boxed());
+    return (r, async move { internal.run(start_time_rx).await }.boxed());
   }
   pub async fn subscribe(
     &self,
@@ -149,7 +150,7 @@ impl ChannelsSubscriber {
 
 
 pub trait ChannelsBuffering<P: ProxyToSamplesBuffer> {
-  fn connect_channel(&mut self, start_time: Clock, rb_output: &mut Option<RBOutput<Sample, P>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, P>>;
+  fn connect_channel(&mut self, start_time: Clock, start_time_shift: ClockDiff, rb_output: &mut Option<RBOutput<Sample, P>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, P>>;
   fn disconnect_channel(&mut self, channel_index: usize, flow_index: usize, channel_in_flow: usize, flows_recv: Arc<FlowsReceiver<P>>);
 }
 
@@ -166,7 +167,7 @@ impl OwnedBuffering {
 }
 
 impl ChannelsBuffering<OwnedBuffer<Atomic<Sample>>> for OwnedBuffering {
-  fn connect_channel(&mut self, start_time: Clock, rb_output: &mut Option<RBOutput<Sample, OwnedBuffer<Atomic<Sample>>>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>> {
+  fn connect_channel(&mut self, start_time: Clock, _start_time_shift: ClockDiff, rb_output: &mut Option<RBOutput<Sample, OwnedBuffer<Atomic<Sample>>>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>> {
     let (sink, source) = if rb_output.is_none() {
       let (sink, source) =
         ring_buffer::new_owned::<Sample>(self.buffer_length, start_time as usize, self.hole_fix_wait);
@@ -192,35 +193,34 @@ impl ChannelsBuffering<OwnedBuffer<Atomic<Sample>>> for OwnedBuffering {
 pub struct ExternalBuffering {
   channels: Vec<ExternalBufferParameters<Sample>>,
   hole_fix_wait: usize,
-  ring_buffers: Vec<Option<Arc<RingBufferShared<Sample, ExternalBuffer<Atomic<Sample>>>>>>,
+  ring_buffers: Vec<Arc<RingBufferShared<Sample, ExternalBuffer<Atomic<Sample>>>>>,
   //on_disconnect: Vec<Option<Box<dyn FnOnce(Arc<RingBufferShared<Sample, ExternalBuffer<Atomic<Sample>>>>) -> ()>>>,
 }
 
 impl ExternalBuffering {
   pub fn new(channels: Vec<ExternalBufferParameters<Sample>>, hole_fix_wait: usize) -> Self {
     let channels_count = channels.len();
+    let ring_buffers = (0..channels_count).map(|chi|ring_buffer::shared_from_external(&channels[chi], 0)).collect_vec();
     Self {
       channels,
       hole_fix_wait,
-      ring_buffers: (0..channels_count).map(|_|None).collect_vec(),
+      ring_buffers,
     }
   }
 }
 
 impl ChannelsBuffering<ExternalBuffer<Atomic<Sample>>> for ExternalBuffering {
-  fn connect_channel(&mut self, start_time: Clock, rb_output: &mut Option<RBOutput<Sample, ExternalBuffer<Atomic<Sample>>>>, channel_index: usize, _latency_samples: usize) -> Option<RBInput<Sample, ExternalBuffer<Atomic<Sample>>>> {
-    debug_assert!(rb_output.is_none()); // ringbuffer not cached & not reused in this case
-    let rb_input = ring_buffer::wrap_external_sink(&self.channels[channel_index], start_time as usize, self.hole_fix_wait);
-    self.ring_buffers[channel_index] = Some(rb_input.shared().clone());
+  fn connect_channel(&mut self, start_time: Clock, start_time_shift: ClockDiff, rb_output: &mut Option<RBOutput<Sample, ExternalBuffer<Atomic<Sample>>>>, channel_index: usize, _latency_samples: usize) -> Option<RBInput<Sample, ExternalBuffer<Atomic<Sample>>>> {
+    debug_assert!(rb_output.is_none());
+    let rb_input = RBInput::new(self.ring_buffers[channel_index].clone(), self.hole_fix_wait);
     Some(rb_input)
   }
   fn disconnect_channel(&mut self, channel_index: usize, flow_index: usize, channel_in_flow: usize, flows_recv: Arc<FlowsReceiver<ExternalBuffer<Atomic<Sample>>>>) {
     // TODO: this is a bit illogical, flows_recv.{connect_channel, disconnect_channel} should be in one place
-    if let Some(ringbuf) = self.ring_buffers[channel_index].take() {
-      tokio::spawn(async move {
-        flows_recv.disconnect_channel(flow_index, channel_in_flow, ringbuf).await;
-      });
-    }
+    let rb_shared = self.ring_buffers[channel_index].clone();
+    tokio::spawn(async move {
+      flows_recv.disconnect_channel(flow_index, channel_in_flow, rb_shared).await;
+    });
   }
 }
 
@@ -303,6 +303,7 @@ struct ChannelsSubscriberInternal<P: ProxyToSamplesBuffer, B: ChannelsBuffering<
   flows_recv: Arc<FlowsReceiver<P>>,
   //buffered_samples_per_channel: usize,
   min_latency_ns: usize,
+  ring_buffer_timestamp_shift: isize,
   control_client: Arc<FlowsControlClient>,
   mdns_client: Arc<MdnsClient>,
   subscriptions_info: Arc<RwLock<Vec<Option<SubscriptionInfo>>>>,
@@ -338,6 +339,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
       flows_recv,
       //buffered_samples_per_channel: 524288,
       min_latency_ns: 10_000_000, // TODO dehardcode
+      ring_buffer_timestamp_shift: 0,
       control_client: Arc::new(FlowsControlClient::new(self_info)),
       mdns_client,
       subscriptions_info,
@@ -397,7 +399,9 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     tx_channel_name: &str,
     tx_hostname: &str,
   ) {
-    self.unsubscribe(local_channel_index, false).await;
+    if self.channels[local_channel_index].is_some() {
+      self.unsubscribe(local_channel_index, false).await;
+    }
     self.channels[local_channel_index] = Some(ChannelSubscription {
       tx_channel_name: tx_channel_name.to_owned(),
       tx_hostname: tx_hostname.to_owned(),
@@ -965,7 +969,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
             debug_assert!(local_id == remote.local_flow_index+1);
           }
           let latency_samples = flow.latency_samples;
-          let sink_opt = self.channels_buffering.connect_channel(now /* FIXME shift */, &mut flow.channels_rb_outputs[remote.channel_in_flow], chi, latency_samples);
+          let sink_opt = self.channels_buffering.connect_channel(now /* FIXME shift */, self.ring_buffer_timestamp_shift, &mut flow.channels_rb_outputs[remote.channel_in_flow], chi, latency_samples);
           if let Some(sink) = sink_opt {
             let flows_recv = self.flows_recv.clone();
             tokio::spawn(async move {
@@ -1128,8 +1132,15 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     };
     return true;
   }
-  pub async fn run(&mut self) {
+  pub async fn run(&mut self, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>) {
     self.load_state().await;
+    if let Some(rx) = start_time_rx {
+      if let Ok(start_time) = rx.await {
+        self.ring_buffer_timestamp_shift = 0isize.wrapping_sub_unsigned(start_time);
+      } else {
+        error!("unable to receive start time, ring_buffer addressing will be wrong!");
+      }
+    }
     let mut last_resolving = Instant::now();
     loop {
       // TODO make it more NOHZ

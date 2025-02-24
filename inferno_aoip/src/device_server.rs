@@ -242,7 +242,20 @@ impl DeviceServer {
     self.receive(vec![], Some(start_time_rx), buffering, current_timestamp, Some(on_transfer)).await;
   }
   async fn receive<P: ProxyToSamplesBuffer + Send + Sync + 'static, B: ChannelsBuffering<P> + Send + Sync + 'static>(&mut self, mut tasks: Vec<JoinHandle<()>>, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, channels_buffering: B, current_timestamp: Arc<AtomicUsize>, on_transfer: Option<Box<dyn Fn() + Send>>) {
-    let (flows_rx_handle, flows_rx_thread) = crate::flows_rx::FlowsReceiver::start(self.self_info.clone(), self.get_realtime_clock_receiver(), self.ref_instant, start_time_rx, current_timestamp, on_transfer);
+    let (srx1, srx2) = if let Some(in_rx) = start_time_rx {
+      let (stx1, srx1) = tokio::sync::oneshot::channel::<Clock>();
+      let (stx2, srx2) = tokio::sync::oneshot::channel::<Clock>();
+      tokio::spawn(async {
+        if let Ok(v) = in_rx.await {
+          let _ = stx1.send(v);
+          let _ = stx2.send(v);
+        }
+      });
+      (Some(srx1), Some(srx2))
+    } else {
+      (None, None)
+    };
+    let (flows_rx_handle, flows_rx_thread) = crate::flows_rx::FlowsReceiver::start(self.self_info.clone(), self.get_realtime_clock_receiver(), self.ref_instant, srx1, current_timestamp, on_transfer);
     let flows_rx_handle = Arc::new(flows_rx_handle);
     let (channels_sub_handle, channels_sub_worker) = ChannelsSubscriber::new(
       self.self_info.clone(),
@@ -252,6 +265,7 @@ impl DeviceServer {
       self.mcast_tx.clone(),
       channels_buffering,
       self.state_storage.clone(),
+      srx2,
       self.ref_instant,
     );
     let channels_sub_handle = Arc::new(channels_sub_handle);

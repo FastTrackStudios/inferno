@@ -29,6 +29,7 @@ use usrvclock::ClockOverlay;
 pub const MAX_FLOWS: usize = 128;
 const WAKE_TOKEN: mio::Token = mio::Token(MAX_FLOWS);
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(250);
+pub const CLOSING_SAMPLES_INTERVAL: Duration = Duration::from_millis(1);
 const KEEPALIVE_CONTENT: [u8; 2] = [0x13, 0x37];
 
 const SILENCE_BURST_LEN: usize = 64;
@@ -54,8 +55,7 @@ struct SocketData<P: ProxyToSamplesBuffer> {
 
 struct SilenceWriter<P: ProxyToSamplesBuffer> {
   sink: RBInput<Sample, P>,
-  timestamp: Clock,
-  remaining_samples: usize,
+  end_timestamp: Clock,
 }
 
 enum Command<P: ProxyToSamplesBuffer> {
@@ -71,12 +71,13 @@ struct FlowsReceiverInternal<P: ProxyToSamplesBuffer> {
   commands_receiver: mpsc::Receiver<Command<P>>,
   poll: mio::Poll,
   sockets: Vec<Option<SocketData<P>>>,
-  silence_writers: Vec<Option<SilenceWriter<P>>>,
+  silence_writers: Vec<SilenceWriter<P>>,
   sample_rate: u32,
   clock: MediaClock,
   clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
   ref_instant: Instant,
   on_transfer: Option<Box<dyn Fn() + Send>>,
+  current_timestamp: Arc<AtomicUsize>,
 }
 
 impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
@@ -96,7 +97,6 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             let num_channels = sd.channels.len();
             sd.last_packet_time.store(ref_instant.elapsed().as_secs() as _, Ordering::Relaxed);
             
-
             let _total_num_samples = (recv_size - 9) / sd.bytes_per_sample;
             //let audio_bytes = &buf[9..9+total_num_samples*sd.bytes_per_sample];
             let audio_bytes = &buf[9..recv_size];
@@ -120,7 +120,6 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                     remaining_samples: samples_count,
                   };
                   match sd.bytes_per_sample {
-                    // FIXME: in ALSA plugin there can be more than 1 sink per input channel because we skip SamplesCollector !!!
                     2 => sink.write_from_at(ts as usize, S16ReaderIterator(reader)),
                     3 => sink.write_from_at(ts as usize, S24ReaderIterator(reader)),
                     4 => sink.write_from_at(ts as usize, S32ReaderIterator(reader)),
@@ -150,14 +149,24 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
     receiver.recv().await.unwrap_or(Command::Shutdown)
   }
   fn run(&mut self, mut start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>) {
-    let mut next_keepalive = Instant::now() + KEEPALIVE_INTERVAL;
+    let keepalive_interval_between_flows = KEEPALIVE_INTERVAL / self.sockets.len().try_into().unwrap();
+    let mut next_keepalive = Instant::now() + keepalive_interval_between_flows;
+    let mut keepalive_index = 0usize;
+    let mut next_closing_samples = Instant::now() + CLOSING_SAMPLES_INTERVAL;
     let mut events = mio::Events::with_capacity(MAX_FLOWS+1); // +1 because of waker, TODO: really necessary?
     let mut may_have_command = false;
     let mut start_timestamp = None;
 
     set_current_thread_realtime(88);
     loop {
-      self.poll.poll(&mut events, if may_have_command { Some(Duration::from_millis(1)) } else { None }).log_and_forget();
+      let write_to_rbs = self.sockets.iter().find(|opt|opt.is_some()).is_some() || self.silence_writers.len() > 0;
+      let timeout = if may_have_command || write_to_rbs {
+        Some(CLOSING_SAMPLES_INTERVAL)
+      } else {
+        self.current_timestamp.store(usize::MAX, Ordering::Release);
+        None
+      };
+      self.poll.poll(&mut events, timeout).log_and_forget();
 
       if self.clock_recv.update() {
         if let Some(ovl) = self.clock_recv.get() {
@@ -211,7 +220,6 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
         self.on_transfer.as_ref().map(|cb| cb());
       }
       
-
       if may_have_command {
         match self.commands_receiver.try_recv() {
           Ok(command) => match command {
@@ -225,21 +233,43 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             }
             Command::RemoveSocket { index } => {
               self.poll.registry().deregister(&mut self.sockets[index].as_mut().unwrap().socket).unwrap();
-              let channels = self.sockets[index].take().unwrap().channels;
-              if let Some(now) = self.clock.now_in_timebase(self.sample_rate as u64) {
-                channels.into_iter().flatten().for_each(|ch| {
-                  //let rb_size = ch.sink.ring_buffer_size();
-                  //let writer = SilenceWriter { sink: ch.sink, remaining_samples: rb_size, timestamp: now };
-                  //let free_index = self.silence_writers.iter().position(|opt|opt.is_none()).expect("ran out of space for SilenceWriter");
-                  //self.silence_writers[free_index] = Some(writer);
-                });
-              } else {
-                warn!("no media clock, unable to initialize SilenceWriter")
+              let socket = self.sockets[index].take().unwrap();
+              if cfg!(debug_assertions) {
+                let count: usize = socket.channels.iter().filter_map(|ch_opt|ch_opt.as_ref()).map(|ch|ch.sinks.len()).sum();
+                if count>0 {
+                  error!("BUG: still have {} channels when removing socket index {index}", socket.channels.len());
+                }
               }
+              let _ = socket;
             }
             Command::ConnectChannel { socket_index, channel_in_flow, sink, latency_samples } => {
+              if cfg!(debug_assertions) {
+                for sd in self.sockets.iter().filter_map(|opt|opt.as_ref()) {
+                  for ch in sd.channels.iter().filter_map(|opt|opt.as_ref()) {
+                    for existing_sink in &ch.sinks {
+                      assert!(!Arc::ptr_eq(sink.shared(), existing_sink.shared()));
+                    }
+                  }
+                }
+              }
+              let timestamp_shift = start_timestamp.map(|start_ts| (0 as ClockDiff).wrapping_sub_unsigned(start_ts).wrapping_add_unsigned(latency_samples.try_into().unwrap())).unwrap_or(0);
+
+              // prefer existing sink - this ensures that buffer is erased properly but not excessively
+              let sink = if let Some(existing_index) = self.silence_writers.iter().position(|sw|Arc::ptr_eq(sw.sink.shared(), sink.shared())) {
+                self.silence_writers.swap_remove(existing_index).sink
+                // TODO: previous sink is dropped. is freeing memory in realtime thread safe???
+              } else {
+                if let Some(now) = self.clock.now_in_timebase(self.sample_rate.into()) {
+                  sink.shared().reset(now.wrapping_add_signed(timestamp_shift));
+                } else {
+                  error!("clock not available, unable to reset ringbuffer when connecting channel");
+                }
+                sink
+              };
+
               let socket = self.sockets[socket_index].as_mut().unwrap();
               let channel_opt = &mut socket.channels[channel_in_flow];
+
               if channel_opt.is_none() {
                 let mut sinks = socket.empty_sinks_vecs.pop().expect("ran out of empty sinks");
                 debug_assert!(sinks.is_empty());
@@ -248,7 +278,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                 *channel_opt = Some(Channel {
                   sinks,
                   latency_samples,
-                  timestamp_shift: start_timestamp.map(|start_ts| (0 as ClockDiff).wrapping_sub_unsigned(start_ts).wrapping_add_unsigned(latency_samples.try_into().unwrap())).unwrap_or(0)
+                  timestamp_shift,
                 });
               } else {
                 let channel = channel_opt.as_mut().unwrap();
@@ -262,7 +292,14 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                 if let Some(ch) = sd.channels[channel_in_flow].as_mut() {
                   let sink_index_opt = ch.sinks.iter().position(|sink|Arc::ptr_eq(sink.shared(), &rb_shared));
                   if let Some(sink_index) = sink_index_opt {
-                    ch.sinks.swap_remove(sink_index);
+                    let sink = ch.sinks.swap_remove(sink_index);
+                    if let Some(now) = self.clock.now_in_timebase(self.sample_rate.into()) {
+                      let rb_size = sink.ring_buffer_size();
+                      let writer = SilenceWriter { sink, end_timestamp: now.wrapping_add(rb_size + rb_size/2 /*TODO: ???*/).wrapping_add_signed(ch.timestamp_shift) };
+                      self.silence_writers.push(writer);
+                    } else {
+                      warn!("no media clock, unable to initialize SilenceWriter");
+                    }
                   }
                 }
               }
@@ -277,22 +314,66 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           }
         };
       }
-      
+
       let now = Instant::now();
+
+      if start_time_rx.is_none() && now >= next_closing_samples {
+        if let Some(now_ts) = self.clock.now_in_timebase(self.sample_rate.into()) {
+          let ts = now_ts.wrapping_sub(start_timestamp.unwrap_or(0));
+
+          // Normally this position will be already written because in self.receive we are writing into future
+          // (write position is increased by latency_samples)
+          // However, if the stream breaks, it will ensure that buffer is filled with zeros
+          for sd in self.sockets.iter().filter_map(|opt|opt.as_ref()) {
+            for ch in sd.channels.iter().filter_map(|opt|opt.as_ref()) {
+              for sink in &ch.sinks {
+                sink.close_items_until(ts);
+              }
+            }
+          }
+
+          let mut finished = None;
+          for (index, sw) in self.silence_writers.iter().enumerate() {
+            sw.sink.close_items_until(ts);
+            if wrapped_diff(ts, sw.end_timestamp) >= 0 {
+              finished = Some(index);
+            }
+          }
+          //self.current_timestamp.store(if now_ts!=usize::MAX { now_ts } else { usize::MAX-1 }, Ordering::Release);
+
+          if let Some(finished_index) = finished {
+            self.silence_writers.swap_remove(finished_index);
+          }
+        } else {
+          self.current_timestamp.store(usize::MAX, Ordering::Release);
+        }
+
+        next_closing_samples += CLOSING_SAMPLES_INTERVAL;
+        if next_closing_samples <= now {
+          next_closing_samples = now + CLOSING_SAMPLES_INTERVAL;
+        }
+      }
+
       if now >= next_keepalive {
-        for sd in self.sockets.iter().filter_map(|opt|opt.as_ref()).filter(|sd|sd.send_keepalives) {
-          if let Some(src) = sd.last_source {
-            if let Err(e) = sd.socket.send_to(&KEEPALIVE_CONTENT, src) {
-              error!("failed to send keepalive to {src:?}: {e:?}");
-            } else {
-              trace!("sent keepalive");
+        if let Some(sd) = &self.sockets[keepalive_index] {
+          if sd.send_keepalives {
+            if let Some(src) = sd.last_source {
+              if let Err(e) = sd.socket.send_to(&KEEPALIVE_CONTENT, src) {
+                error!("failed to send keepalive to {src:?}: {e:?}");
+              } else {
+                trace!("sent keepalive");
+              }
             }
           }
         }
-        next_keepalive += KEEPALIVE_INTERVAL;
+        next_keepalive += keepalive_interval_between_flows;
         if next_keepalive <= now {
           // nothing was received for very long, in that case don't spam with keepalives
-          next_keepalive = now + KEEPALIVE_INTERVAL;
+          next_keepalive = now + keepalive_interval_between_flows;
+        }
+        keepalive_index += 1;
+        if keepalive_index >= self.sockets.len() {
+          keepalive_index = 0;
         }
       }
     }
@@ -306,33 +387,32 @@ pub struct FlowsReceiver<P: ProxyToSamplesBuffer> {
 }
 
 impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
-  fn run(rx: mpsc::Receiver<Command<P>>, poll: mio::Poll, sample_rate: u32, ref_instant: Instant, clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, on_transfer: Option<Box<dyn Fn() + Send>>) {
+  fn run(rx: mpsc::Receiver<Command<P>>, poll: mio::Poll, sample_rate: u32, ref_instant: Instant, clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, on_transfer: Option<Box<dyn Fn() + Send>>, current_timestamp: Arc<AtomicUsize>, max_channels: usize) {
     let mut internal =
       FlowsReceiverInternal {
         commands_receiver: rx,
         sockets: (0..MAX_FLOWS).map(|_|None).collect_vec(),
-        silence_writers: (0..MAX_FLOWS).map(|_|None).collect_vec(),
+        silence_writers: Vec::with_capacity(max_channels),
         poll,
         sample_rate,
         clock: MediaClock::new(),
         clock_recv,
         ref_instant,
         on_transfer,
+        current_timestamp,
       };
     internal.run(start_time_rx);
   }
-  pub fn start(self_info: Arc<DeviceInfo>, clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>, ref_instant: Instant, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, _current_timestamp: Arc<AtomicUsize>, on_transfer: Option<Box<dyn Fn() + Send>>) -> (Self, JoinHandle<()>) {
-    // actually updating current_timestamp isn't necessarily needed
-    // because we always have receive latency so we don't have to be sample-accurate
-    // TODO: but it may increase stability in low-latency settings
+  pub fn start(self_info: Arc<DeviceInfo>, clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>, ref_instant: Instant, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, current_timestamp: Arc<AtomicUsize>, on_transfer: Option<Box<dyn Fn() + Send>>) -> (Self, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(100);
     let poll = mio::Poll::new().unwrap();
     let waker = mio::Waker::new(poll.registry(), WAKE_TOKEN).unwrap();
     let srate = self_info.sample_rate;
+    let max_channels = self_info.rx_channels.len();
     let thread_join = std::thread::Builder::new().name("flows RX".to_owned()).spawn(move || {
-      Self::run(rx, poll, srate, ref_instant, clock_recv, start_time_rx, on_transfer);
+      Self::run(rx, poll, srate, ref_instant, clock_recv, start_time_rx, on_transfer, current_timestamp, max_channels);
     }).unwrap();
-    return (Self { commands_sender: tx, waker, max_channels: self_info.rx_channels.len() }, thread_join);
+    return (Self { commands_sender: tx, waker, max_channels }, thread_join);
   }
   pub async fn shutdown(&self) {
     self.commands_sender.send(Command::Shutdown).await.log_and_forget();

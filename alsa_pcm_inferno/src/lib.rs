@@ -50,10 +50,6 @@ const PLUGIN_NAME: [u8; 23] = *b"Inferno virtual device\0";
 
 lazy_static! {
     static ref global_instances: RwLock<BTreeMap<DeviceId, Arc<Mutex<InfernoInstance>>>> = RwLock::new(BTreeMap::new());
-    /* static ref rx_channels_count: usize = env::var("INFERNO_RX_CHANNELS").ok().
-        map(|s|s.parse().expect("invalid INFERNO_RX_CHANNELS, must be integer")).unwrap_or(2);
-    static ref tx_channels_count: usize = env::var("INFERNO_TX_CHANNELS").ok().
-        map(|s|s.parse().expect("invalid INFERNO_TX_CHANNELS, must be integer")).unwrap_or(2); */
     static ref global_initialized: AtomicBool = false.into();
 }
 
