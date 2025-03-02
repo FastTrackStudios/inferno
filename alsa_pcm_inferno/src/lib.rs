@@ -175,8 +175,12 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         if now_samples_opt.is_some() && this.start_time.is_none() {
             println!("warning: setting start_time in plugin_pointer, not plugin_start");
             this.start_time = Some(now_samples_opt.unwrap() as usize);
-            if let Err(e) = this.start_time_tx.take().unwrap().send(now_samples_opt.unwrap()) {
-                error!("failed to send start timestamp: {e}. tx/rx will not work.");
+            if let Some(start_time_tx) = this.start_time_tx.take() {
+                if let Err(e) = start_time_tx.send(now_samples_opt.unwrap()) {
+                    error!("failed to send start timestamp: {e}. tx/rx will not work.");
+                }
+            } else {
+                error!("failed to send start timestamp: start_time_tx already used, BUG");
             }
         }
         if now_samples_opt.is_some() && this.start_time.is_some() {

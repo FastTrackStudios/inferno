@@ -69,11 +69,15 @@ impl SelfInfoBuilder for DeviceInfo {
         other => panic!("got local IP which is not IPv4: {other:?}"),
       }
     );
+
+    let process_id: u16 = settings.get("PROCESS_ID").map(|s|s.parse().expect("PROCESS_ID must be u16")).unwrap_or(0);
+
     let mut devid = [0u8; 8];
     settings.get("DEVICE_ID").map(|idstr| {
       hex::decode_to_slice(idstr, &mut devid).expect("invalid DEVICE_ID, should contain hex data");
     }).unwrap_or_else(|| {
       devid[2..6].copy_from_slice(&my_ipv4.octets());
+      devid[6..8].copy_from_slice(&process_id.to_be_bytes());
     });
 
     // TODO make hostname and sample rate configurable from DC
@@ -90,7 +94,7 @@ impl SelfInfoBuilder for DeviceInfo {
       manufacturer: "Inferno-AoIP".to_owned(),
       model_name: app_name.to_owned(),
       factory_device_id: devid,
-      process_id: 0,
+      process_id,
       vendor_string: "Audinate Dante-compatible".to_owned(),
       factory_hostname: format!("{short_app_name}-{}", hex::encode(devid)),
       friendly_hostname,
@@ -107,11 +111,6 @@ impl SelfInfoBuilder for DeviceInfo {
       flows_control_port: FLOWS_CONTROL_PORT,
       info_request_port: INFO_REQUEST_PORT,
     };
-
-    if let Some(process_id) = settings.get("PROCESS_ID").map(|s|s.parse().expect("PROCESS_ID must be u16")) {
-      result.process_id = process_id;
-      result.factory_device_id[6..8].copy_from_slice(&process_id.to_be_bytes());
-    }
 
     if let Some(altport) = settings.get("ALT_PORT").map(|s|s.parse().expect("ALT_PORT must be u16")) {
       result.arc_port = altport;

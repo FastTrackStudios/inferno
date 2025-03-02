@@ -380,7 +380,7 @@ impl<T: NoUninit, P: ProxyToBuffer<Atomic<T>>> RBOutput<T, P> {
     }
 
     if !self.rb.buffer.unconditional_read() {
-      let writing_pos = self.rb.writing_pos.load(Ordering::Acquire);
+      let writing_pos = self.rb.writing_pos.load(Ordering::SeqCst);
       let diff = wrapsub(writing_pos, start_timestamp);
       if diff > self.rb.items_size.try_into().unwrap() {
         // data has been overwritten in the meantime, so some data at the beginning of the buffer may be wrong
