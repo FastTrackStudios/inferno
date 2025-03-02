@@ -198,10 +198,13 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
     };
 
     if buffered < 0 && ((*io).state == SND_PCM_STATE_RUNNING || (*io).state == SND_PCM_STATE_DRAINING) {
-        // FIXME: will crash here if media clock goes backwards
-        let ioplug_avail = snd_pcm_ioplug_avail(io, ptr.try_into().unwrap(), (*io).appl_ptr);
-        let ioplug_hw_avail = snd_pcm_ioplug_hw_avail(io, ptr.try_into().unwrap(), (*io).appl_ptr);
-        println!("buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}");
+        if let Ok(hw_ptr) = ptr.try_into() {
+            let ioplug_avail = snd_pcm_ioplug_avail(io, hw_ptr, (*io).appl_ptr);
+            let ioplug_hw_avail = snd_pcm_ioplug_hw_avail(io, hw_ptr, (*io).appl_ptr);
+            println!("buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}");
+        } else {
+            println!("clock discontinuity");
+        }
         
         return (-EPIPE).try_into().unwrap(); // report xrun
         // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom

@@ -24,6 +24,7 @@ pub type FineClock = u64;
 pub type FineClockDiff = i64;
 
 // it's better to have the clock in the past than in the future - otherwise Dante devices receiving from us go mad and fart
+// TODO: do it only for TX
 const CLOCK_OFFSET_NS: FineClockDiff = -500_000;
 
 
