@@ -12,7 +12,7 @@ use std::io::ErrorKind::WouldBlock;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -380,10 +380,16 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
   }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct FlowInfo {
+  pub rx_port: u16,
+}
+
 pub struct FlowsReceiver<P: ProxyToSamplesBuffer> {
   commands_sender: mpsc::Sender<Command<P>>,
   waker: mio::Waker,
   max_channels: usize,
+  pub flows_info: Arc<RwLock<BTreeMap<usize, FlowInfo>>>,
 }
 
 impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
@@ -412,7 +418,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     let thread_join = std::thread::Builder::new().name("flows RX".to_owned()).spawn(move || {
       Self::run(rx, poll, srate, ref_instant, clock_recv, start_time_rx, on_transfer, current_timestamp, max_channels);
     }).unwrap();
-    return (Self { commands_sender: tx, waker, max_channels }, thread_join);
+    return (Self { commands_sender: tx, waker, max_channels, flows_info: Default::default() }, thread_join);
   }
   pub async fn shutdown(&self) {
     self.commands_sender.send(Command::Shutdown).await.log_and_forget();
@@ -434,6 +440,10 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       v.reserve_exact(self.max_channels);
       v
     }).collect_vec();
+    let port = socket.local_addr().unwrap().port();
+    self.flows_info.write().unwrap().insert(local_index, FlowInfo {
+      rx_port: port,
+    });
     self
       .commands_sender
       .send(Command::AddSocket {
@@ -454,6 +464,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
   }
   pub async fn remove_socket(&self, local_index: usize) {
     debug!("removing flow receiver local index={local_index}");
+    self.flows_info.write().unwrap().remove(&local_index);
     self.commands_sender.send(Command::RemoveSocket { index: local_index }).await.log_and_forget();
     self.waker.wake().log_and_forget();
   }

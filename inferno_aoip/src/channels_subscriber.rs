@@ -1,3 +1,4 @@
+use crate::flows_rx::FlowInfo;
 use crate::net_utils::{create_mio_udp_socket, MAX_PAYLOAD_BYTES};
 use crate::samples_collector::SamplesCollector;
 use crate::state_storage::StateStorage;
@@ -68,6 +69,7 @@ pub struct SubscriptionInfo {
 pub struct ChannelsSubscriber {
   commands_sender: mpsc::Sender<Command>,
   subscriptions_info: Arc<RwLock<Vec<Option<SubscriptionInfo>>>>,
+  flows_info: Arc<RwLock<BTreeMap<usize, FlowInfo>>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -99,6 +101,7 @@ impl ChannelsSubscriber {
     let r = Self {
       commands_sender: tx,
       subscriptions_info: Arc::new(RwLock::new(vec![None; self_info.rx_channels.len()])),
+      flows_info: flows_recv.flows_info.clone(),
     };
     let mut internal = ChannelsSubscriberInternal::<P, B>::new(
       rx,
@@ -145,8 +148,10 @@ impl ChannelsSubscriber {
   pub fn channel_status(&self, channel_index: usize) -> Option<SubscriptionInfo> {
     self.subscriptions_info.read().unwrap()[channel_index].clone()
   }
+  pub fn flows_info(&self) -> Arc<RwLock<BTreeMap<usize, FlowInfo>>> {
+    self.flows_info.clone()
+  }
 }
-
 
 
 pub trait ChannelsBuffering<P: ProxyToSamplesBuffer> {
