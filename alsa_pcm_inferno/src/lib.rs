@@ -4,9 +4,9 @@ use alsa_sys_all::*;
 
 use futures_util::FutureExt;
 use inferno_aoip::utils::{run_future_in_new_thread, LogAndForget};
-use inferno_aoip::{AtomicSample, Clock, ClockDiff, DeviceId, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, PositionReportDestination, RealTimeClockReceiver, Sample, SelfInfoBuilder};
+use inferno_aoip::{AtomicSample, Clock, ClockDiff, DeviceId, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, PositionReportDestination, RealTimeClockReceiver, Sample, Settings};
 use lazy_static::lazy_static;
-use libc::{c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN, R11};
+use libc::{c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN};
 use log::error;
 use tokio::sync::{mpsc, oneshot};
 use core::slice;
@@ -53,12 +53,14 @@ lazy_static! {
     static ref global_initialized: AtomicBool = false.into();
 }
 
-fn get_or_create_instance(self_info: DeviceInfo) -> Arc<Mutex<InfernoInstance>> {
+fn get_or_create_instance(settings: &Settings) -> Arc<Mutex<InfernoInstance>> {
     let mut instances_locked = global_instances.write().unwrap();
-    let entry = instances_locked.entry(self_info.factory_device_id);
-    entry.or_insert_with(|| {
+    if instances_locked.is_empty() {
         let logenv = env_logger::Env::default().default_filter_or("debug");
         env_logger::builder().parse_env(logenv).format_timestamp_micros().init();
+    }
+    let entry = instances_locked.entry(settings.self_info.factory_device_id);
+    entry.or_insert_with(|| {
         
         //self_info.sample_rate = sample_rate;
         // TODO make tx & rx channels based on (*io).channels
@@ -70,10 +72,11 @@ fn get_or_create_instance(self_info: DeviceInfo) -> Arc<Mutex<InfernoInstance>> 
 
         let (commands_sender, mut commands_rx) = mpsc::channel(16);
 
+        let settings = settings.clone();
         let thread = run_future_in_new_thread("Inferno main", move || async move {
             // TODO DeviceServer::start may fail internally (e.g. if other process using Inferno is already listening on network ports)
             // retrying infinitely will spam the log. (Audacity behaves this way if Inferno is already running)
-            let mut device_server = DeviceServer::start(self_info).await;
+            let mut device_server = DeviceServer::start(settings).await;
             loop {
                 match commands_rx.recv().await {
                     Some(command) => match command {
@@ -116,9 +119,9 @@ fn get_or_create_instance(self_info: DeviceInfo) -> Arc<Mutex<InfernoInstance>> 
     }).clone()
 }
 
-fn get_instance(self_info: &DeviceInfo) -> Option<Arc<Mutex<InfernoInstance>>> {
+fn get_instance(settings: &Settings) -> Option<Arc<Mutex<InfernoInstance>>> {
     let instances_locked = global_instances.read().unwrap();
-    instances_locked.get(&self_info.factory_device_id).map(|a|a.clone())
+    instances_locked.get(&settings.self_info.factory_device_id).map(|a|a.clone())
 }
 
 struct StreamInfo {
@@ -130,7 +133,8 @@ struct StreamInfo {
 struct MyIOPlug {
     io: snd_pcm_ioplug_t,
     callbacks: snd_pcm_ioplug_callback_t,
-    self_info: DeviceInfo, // TODO: this is needlessly duplicated in both TX and RX instance
+    settings: Settings,
+    //config: BTreeMap<String, String>,
     ref_time: Instant,
     stream_info: Option<StreamInfo>,
     buffers_valid: Arc<RwLock<bool>>,
@@ -186,6 +190,7 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         if now_samples_opt.is_some() && this.start_time.is_some() {
             (now_samples_opt.unwrap() as usize).wrapping_sub(this.start_time.unwrap()) as snd_pcm_sframes_t
         } else {
+            //log::debug!("clock not ready... {} {}", now_samples_opt.is_some(), this.start_time.is_some());
             0
         }
         //now_samples_opt.map(|now_samples| now_samples.wrapping_sub(this.start_time.unwrap())).unwrap_or(0) as i64
@@ -198,10 +203,13 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
     };
 
     if buffered < 0 && ((*io).state == SND_PCM_STATE_RUNNING || (*io).state == SND_PCM_STATE_DRAINING) {
-        // FIXME: will crash here if media clock goes backwards
-        let ioplug_avail = snd_pcm_ioplug_avail(io, ptr.try_into().unwrap(), (*io).appl_ptr);
-        let ioplug_hw_avail = snd_pcm_ioplug_hw_avail(io, ptr.try_into().unwrap(), (*io).appl_ptr);
-        println!("buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}");
+        if let Ok(hw_ptr) = ptr.try_into() {
+            let ioplug_avail = snd_pcm_ioplug_avail(io, hw_ptr, (*io).appl_ptr);
+            let ioplug_hw_avail = snd_pcm_ioplug_hw_avail(io, hw_ptr, (*io).appl_ptr);
+            println!("buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}");
+        } else {
+            println!("clock discontinuity");
+        }
         
         return (-EPIPE).try_into().unwrap(); // report xrun
         // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
@@ -214,6 +222,7 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         this.stream_info.as_mut().unwrap().boundary_add -= boundary;
         ptr -= boundary;
     }
+    //log::debug!("pointer: {ptr}");
 
     ptr
 }
@@ -284,7 +293,7 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     let (start_time_tx, start_time_rx) = oneshot::channel::<Clock>();
     let (clock_rx_tx, clock_rx_rx) = oneshot::channel::<RealTimeClockReceiver>();
 
-    let inferno_instance = get_or_create_instance(this.self_info.clone());
+    let inferno_instance = get_or_create_instance(&this.settings);
     {
         let mut common = inferno_instance.lock().unwrap();
         this.start_time_tx = None;
@@ -364,7 +373,7 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
     *this.buffers_valid.write().unwrap() = false;
     
     // TODO blocking_send inside mutex, risk of deadlock?
-    if let Some(common_mutex) = get_instance(&this.self_info) {
+    if let Some(common_mutex) = get_instance(&this.settings) {
         let mut common = common_mutex.lock().unwrap();
         match (*io).stream {
             SND_PCM_STREAM_CAPTURE => {
@@ -407,7 +416,7 @@ unsafe extern "C" fn plugin_close(io: *mut snd_pcm_ioplug_t) -> c_int {
     let this = get_private(io);
     {
         // TODO blocking_send inside mutex, risk of deadlock?
-        if let Some(common_mutex) = get_instance(&this.self_info) {
+        if let Some(common_mutex) = get_instance(&this.settings) {
             let common = common_mutex.lock().unwrap();
             if (!common.capturing) && (!common.playing) {
                 common.commands_sender.blocking_send(Command::Shutdown).unwrap();
@@ -440,9 +449,6 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         pos = snd_config_iterator_next(pos);
     }
 
-
-    let app_name = get_app_name().unwrap_or(std::process::id().to_string());
-
     let efd = eventfd(0, EFD_CLOEXEC);
 
     let mut callbacks = snd_pcm_ioplug_callback_t {
@@ -457,10 +463,13 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         //callbacks.transfer = Some(plugin_capture_transfer); // TODO
     }
 
+    let app_name = get_app_name().unwrap_or(format!("process {}", std::process::id().to_string()));
+    let settings = Settings::new(&app_name, &app_name, None, &config);
+
     let myio = Box::into_raw(Box::new(MyIOPlug {
         io: zeroed(),
         callbacks,
-        self_info: DeviceInfo::new_self(&format!("{app_name} via Inferno-AoIP"), &app_name, None, config),
+        settings,
         ref_time: Instant::now(),
         stream_info: None,
         buffers_valid: Arc::new(RwLock::new(false)),
@@ -491,6 +500,8 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 
     io.private_data = myio as *mut _;
 
+    let self_info = &(*myio).settings.self_info;
+
     let r = snd_pcm_ioplug_create(io, name, stream, mode);
     if r < 0 {
         error!("snd_pcm_ioplug_create returned {r}");
@@ -509,15 +520,15 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         return r;
     }
 
-    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_RATE as i32, 1, [(*myio).self_info.sample_rate].as_ptr());
+    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_RATE as i32, 1, [self_info.sample_rate].as_ptr());
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_RATE returned {r}");
         return r;
     }
 
     let num_channels = match (*io).stream {
-        SND_PCM_STREAM_CAPTURE => (*myio).self_info.rx_channels.len(),
-        SND_PCM_STREAM_PLAYBACK => (*myio).self_info.tx_channels.len(),
+        SND_PCM_STREAM_CAPTURE => self_info.rx_channels.len(),
+        SND_PCM_STREAM_PLAYBACK => self_info.tx_channels.len(),
         _ => 0
     } as u32;
 
@@ -572,10 +583,3 @@ pub extern "C" fn _snd_pcm_inferno_open(pcmp: *mut *mut snd_pcm_t, name: *const 
 #[no_mangle]
 pub extern "C" fn __snd_pcm_inferno_open_dlsym_pcm_001() {
 }
-
-
-/* #[link(name = "asound")]
-extern "C" {
-    fn snd_pcm_ioplug_create(io: *mut snd_pcm_ioplug_t, name: *const c_char, stream: snd_pcm_stream_t, mode: c_int, flags: c_uint) -> c_int;
-}
- */

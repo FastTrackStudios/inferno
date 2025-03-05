@@ -44,6 +44,7 @@
 //! 
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() {
+//!   // TODO: update line below with Settings
 //!   let self_info = DeviceInfo::new_self("My Inferno device", "MyInferno", None).make_rx_channels(16);
 //!   // TODO: update line below with proper start_* function
 //!   let server = DeviceServer::start(self_info, Box::new(audio_callback)).await;
@@ -75,14 +76,16 @@ mod real_time_box_channel;
 mod ring_buffer;
 mod samples_collector;
 mod samples_utils;
+mod settings;
 mod state_storage;
 mod thread_utils;
 
 pub use common::{Sample, Clock, ClockDiff};
 pub use device_info::*;
-pub use device_server::{DeviceServer, SelfInfoBuilder};
+pub use device_server::DeviceServer;
 pub use media_clock::{MediaClock, RealTimeClockReceiver};
 pub use ring_buffer::{ExternalBufferParameters, PositionReportDestination};
+pub use settings::Settings;
 pub type AtomicSample = atomic::Atomic<Sample>;
 
 pub mod utils {

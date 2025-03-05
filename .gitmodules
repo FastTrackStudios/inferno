@@ -4,3 +4,7 @@
 [submodule "alsa-sys-all"]
 	path = alsa-sys-all
 	url = https://gitlab.com/lumifaza/alsa-sys-all
+[submodule "usrvclock-rs"]
+	path = usrvclock-rs
+	url = https://gitlab.com/lumifaza/usrvclock-rs
+	branch = next

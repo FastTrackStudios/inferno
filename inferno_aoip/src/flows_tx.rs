@@ -12,7 +12,7 @@ use futures::FutureExt;
 use itertools::Itertools;
 use rand::rngs::{SmallRng, ThreadRng};
 use rand::{thread_rng, Rng, SeedableRng};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::{select, sync::mpsc};
 
 use crate::os_utils::set_current_thread_realtime;
@@ -312,25 +312,22 @@ impl FlowsTransmitter {
     };
     internal.run(start_time_rx).await;
   }
-  pub fn start<P: ProxyToSamplesBuffer + Send + Sync + 'static>(self_info: Arc<DeviceInfo>, mut media_clock_receiver: broadcast::Receiver<ClockOverlay>, channels_outputs: Vec<RBOutput<Sample, P>>, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, current_timestamp: Arc<AtomicUsize>, on_transfer: Option<Box<dyn Fn() + Send>>) -> (Self, JoinHandle<()>) {
+  pub fn start<P: ProxyToSamplesBuffer + Send + Sync + 'static>(self_info: Arc<DeviceInfo>, mut media_clock_receiver: watch::Receiver<Option<ClockOverlay>>, channels_outputs: Vec<RBOutput<Sample, P>>, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, current_timestamp: Arc<AtomicUsize>, on_transfer: Option<Box<dyn Fn() + Send>>) -> (Self, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(100);
     let tx1 = tx.clone();
     tokio::spawn(async move {
       loop {
-        let ovl_opt = media_clock_receiver.recv().await;
-        match ovl_opt {
-          Ok(overlay) => {
-            match tx1.send(Command::UpdateClockOverlay(overlay)).await {
-              Ok(()) => {},
-              Err(_) => break
-            }
-          },
-          Err(broadcast::error::RecvError::Closed) => {
+        let overlay_opt = media_clock_receiver.borrow_and_update().clone();
+        if let Some(overlay) = overlay_opt {
+          if tx1.send(Command::UpdateClockOverlay(overlay)).await.is_err() {
+            break;
+          }
+        }
+        match media_clock_receiver.changed().await {
+          Ok(()) => {},
+          Err(_) => {
             break;
           },
-          Err(e) => {
-            warn!("clock receive error {e:?}");
-          }
         }
       }
     });

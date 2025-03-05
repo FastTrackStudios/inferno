@@ -3,7 +3,7 @@ use std::{env, fs::File, mem::size_of};
 use log::{info, error};
 use clap::Parser;
 
-use inferno_aoip::{Sample, DeviceInfo, DeviceServer, SelfInfoBuilder};
+use inferno_aoip::{Sample, DeviceServer, Settings};
 
 const ABOUT: &str = "Inferno2pipe
 Copyright (C) 2023-2024 Teodor Wozniak
@@ -37,12 +37,14 @@ async fn main() {
   env_logger::init_from_env(logenv);
 
   let args = Args::parse();
+  let ch_count = args.channels_count;
 
-  let self_info = DeviceInfo::new_self("Inferno2pipe", "Inferno2pipe", None, Default::default()).make_rx_channels(args.channels_count);
+  let mut settings = Settings::new("Inferno2pipe", "Inferno2pipe", None, &Default::default());
+  settings.make_rx_channels(ch_count);
 
   let mut output_file = File::create(args.output).unwrap();
   let mut buffer: Vec<u8> =
-    vec![0; self_info.rx_channels.len() * (self_info.sample_rate as usize) * size_of::<Sample>() / 10];
+    vec![0; ch_count * (settings.self_info.sample_rate as usize) * size_of::<Sample>() / 10];
   let write_callback = move |samples_count, channels: &Vec<Vec<Sample>>| {
     let stride = channels.len() * size_of::<Sample>();
     let len = stride * samples_count;
@@ -60,7 +62,7 @@ async fn main() {
     output_file.write_all(&buffer[..len]).unwrap_or_else(|e| error!("error writing output: {e:?}"));
   };
 
-  let mut server = DeviceServer::start(self_info).await;
+  let mut server = DeviceServer::start(settings).await;
   server.receive_with_callback(Box::new(write_callback)).await;
   let _ = tokio::signal::ctrl_c().await;
   server.shutdown().await;
