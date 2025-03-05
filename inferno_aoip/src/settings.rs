@@ -1,0 +1,121 @@
+use std::{collections::BTreeMap, env, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::Arc};
+
+use crate::{Channel, DeviceInfo};
+use crate::protocol::proto_arc::PORT as ARC_PORT;
+use crate::protocol::proto_cmc::PORT as CMC_PORT;
+use crate::protocol::flows_control::PORT as FLOWS_CONTROL_PORT;
+use crate::protocol::mcast::INFO_REQUEST_PORT as INFO_REQUEST_PORT;
+
+
+fn create_self_info(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr>, settings: &BTreeMap<String, String>) -> DeviceInfo {
+  // TODO: change expect to non-fatal errors, with current approach an app using ALSA plugin may be crashed for a bening reason
+
+  let my_ipv4 = my_ip.or_else(||
+    settings.get("BIND_IP").map(|ipstr|
+      ipstr.parse().expect("invalid IP in setting BIND_IP")
+    )
+  ).unwrap_or_else(||
+    match local_ip_address::local_ip().expect("unknown local IP, cannot continue") {
+      IpAddr::V4(a) => a,
+      other => panic!("got local IP which is not IPv4: {other:?}"),
+    }
+  );
+
+  let process_id: u16 = settings.get("PROCESS_ID").map(|s|s.parse().expect("PROCESS_ID must be u16")).unwrap_or(0);
+
+  let mut devid = [0u8; 8];
+  settings.get("DEVICE_ID").map(|idstr| {
+    hex::decode_to_slice(idstr, &mut devid).expect("invalid DEVICE_ID, should contain hex data");
+  }).unwrap_or_else(|| {
+    devid[2..6].copy_from_slice(&my_ipv4.octets());
+    devid[6..8].copy_from_slice(&process_id.to_be_bytes());
+  });
+
+  // TODO make hostname and sample rate configurable from DC
+  let friendly_hostname = settings.get("NAME").map(|s|s.clone()).unwrap_or_else(||
+    format!("{app_name} {}", hex::encode(&my_ipv4.octets()))
+  );
+
+  let sample_rate = settings.get("SAMPLE_RATE").
+    map(|s|s.parse().expect("invalid SAMPLE_RATE, must be integer")).unwrap_or(48000);
+
+  let mut result = DeviceInfo {
+    ip_address: my_ipv4,
+    board_name: "Inferno-AoIP".to_owned(),
+    manufacturer: "Inferno-AoIP".to_owned(),
+    model_name: app_name.to_owned(),
+    factory_device_id: devid,
+    process_id,
+    vendor_string: "Audinate Dante-compatible".to_owned(),
+    factory_hostname: format!("{short_app_name}-{}", hex::encode(devid)),
+    friendly_hostname,
+    model_number: "_000000000000000b".to_owned(),
+    rx_channels: vec![],
+    tx_channels: vec![],
+    bits_per_sample: 24, // TODO make it configurable
+    pcm_type: 0xe,
+    latency_ns: 10_000_000, // TODO make it configurable
+    sample_rate,
+
+    arc_port: ARC_PORT,
+    cmc_port: CMC_PORT,
+    flows_control_port: FLOWS_CONTROL_PORT,
+    info_request_port: INFO_REQUEST_PORT,
+  };
+
+  if let Some(altport) = settings.get("ALT_PORT").map(|s|s.parse().expect("ALT_PORT must be u16")) {
+    result.arc_port = altport;
+    result.cmc_port = altport+1;
+    result.flows_control_port = altport+2;
+    result.info_request_port = altport+3;
+  }
+
+  result
+}
+
+#[derive(Clone)]
+pub struct Settings {
+  pub self_info: DeviceInfo,
+  pub clock_path: Option<PathBuf>,
+}
+
+impl Settings {
+  pub fn new(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr>, config: &BTreeMap<String, String>) -> Self {
+    // convert all settings keys to upper case:
+    let mut config: BTreeMap<String, String> = config.clone().into_iter().map(|(k, v)|(k.to_ascii_uppercase(), v)).collect();
+
+    // add settings from env vars if not already set:
+    env::vars().for_each(|(env_key, env_value)| {
+      if let Some(key) = env_key.strip_prefix("INFERNO_") {
+        let key = key.to_ascii_uppercase();
+        config.entry(key).or_insert(env_value);
+      }
+    });
+    let self_info = create_self_info(app_name, short_app_name, my_ip, &config);
+
+    let mut result = Self {
+      self_info,
+      clock_path: config.get("CLOCK_PATH").map(|p|p.try_into().unwrap())
+    };
+
+    // the following should be harmless, as the application still has the chance to overwrite it
+    if let Some(count) = config.get("RX_CHANNELS").map(|s|s.parse().expect("number of channels must be u16")) {
+      result.make_rx_channels(count);
+    }
+    if let Some(count) = config.get("TX_CHANNELS").map(|s|s.parse().expect("number of channels must be u16")) {
+      result.make_tx_channels(count);
+    }
+    
+    result
+  }
+  pub fn make_rx_channels(&mut self, count: usize) {
+    self.self_info.rx_channels = (1..=count)
+      .map(|id| Channel { factory_name: format!("{id:02}"), friendly_name: format!("RX {id}") })
+      .collect();
+  }
+  pub fn make_tx_channels(&mut self, count: usize) {
+    self.self_info.tx_channels = (1..=count)
+      .map(|id| Channel { factory_name: format!("{id:02}"), friendly_name: format!("TX {id}") })
+      .collect();
+  }
+}

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -90,8 +91,8 @@ impl MediaClock {
 }
 
 
-pub fn start_clock_receiver() -> ClockReceiver {
-  ClockReceiver::start(usrvclock::DEFAULT_SERVER_SOCKET_PATH.into(), Box::new(|e| warn!("clock receive error: {e:?}")))
+pub fn start_clock_receiver(path: Option<PathBuf>) -> ClockReceiver {
+  ClockReceiver::start(path.unwrap_or(usrvclock::DEFAULT_SERVER_SOCKET_PATH.into()), Box::new(|e| warn!("clock receive error: {e:?}")))
 }
 
 pub async fn make_shared_media_clock(receiver: &ClockReceiver) -> Arc<RwLock<MediaClock>> {
@@ -116,37 +117,28 @@ pub async fn make_shared_media_clock(receiver: &ClockReceiver) -> Arc<RwLock<Med
   let media_clock1 = media_clock.clone();
   tokio::spawn(async move {
     loop {
-      match rx.recv().await {
-        Ok(overlay) => {
-          media_clock.write().unwrap().update_overlay(overlay);
-        }
-        Err(broadcast::error::RecvError::Closed) => {
-          break;
-        },
-        Err(e) => {
-          warn!("clock receive error {e:?}");
-        }
+      let overlay_opt = rx.borrow_and_update().clone();
+      if let Some(overlay) = overlay_opt {
+        media_clock.write().unwrap().update_overlay(overlay);
+      }
+      if rx.changed().await.is_err() {
+        break;
       }
     }
   });
   media_clock1
 }
 
-pub fn async_clock_receiver_to_realtime(mut receiver: broadcast::Receiver<ClockOverlay>, initial: Option<ClockOverlay>) -> RealTimeBoxReceiver<Option<ClockOverlay>> {
+pub fn async_clock_receiver_to_realtime(mut receiver: tokio::sync::watch::Receiver<Option<ClockOverlay>>, initial: Option<ClockOverlay>) -> RealTimeBoxReceiver<Option<ClockOverlay>> {
   let (rt_sender, rt_recv) = real_time_box_channel::channel(Box::new(initial));
   tokio::spawn(async move {
     loop {
-      let ovl_opt = receiver.recv().await;
-      match ovl_opt {
-        Ok(overlay) => {
-          rt_sender.send(Box::new(Some(overlay)));
-        },
-        Err(broadcast::error::RecvError::Closed) => {
-          break;
-        },
-        Err(e) => {
-          warn!("clock receive error {e:?}");
-        }
+      let overlay_opt = receiver.borrow_and_update().clone();
+      if let Some(overlay) = overlay_opt {
+        rt_sender.send(Box::new(Some(overlay)));
+      }
+      if receiver.changed().await.is_err() {
+        break;
       }
     }
   });
