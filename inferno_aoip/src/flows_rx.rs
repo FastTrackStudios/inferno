@@ -7,17 +7,18 @@ use crate::samples_utils::*;
 use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RingBufferShared};
 use crate::thread_utils::run_future_in_new_thread;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind::WouldBlock;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicI32, AtomicUsize};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
 use atomic::Ordering;
+use bool_vec::{boolvec, BoolVec};
 use futures::future::select_all;
 use futures::{Future, FutureExt};
 use itertools::Itertools;
@@ -49,8 +50,10 @@ struct SocketData<P: ProxyToSamplesBuffer> {
   last_source: Option<SocketAddr>,
   last_packet_time: Arc<AtomicUsize>, // timebase: seconds since ref_instant
   bytes_per_sample: usize,
+  latency_samples: usize,
   channels: Vec<Option<Channel<P>>>,
   empty_sinks_vecs: Vec<Vec<RBInput<Sample, P>>>,
+  actual_latency_samples: Arc<AtomicI32>,
 }
 
 struct SilenceWriter<P: ProxyToSamplesBuffer> {
@@ -63,7 +66,7 @@ enum Command<P: ProxyToSamplesBuffer> {
   Shutdown,
   AddSocket { index: usize, socket: SocketData<P> },
   RemoveSocket { index: usize },
-  ConnectChannel { socket_index: usize, channel_in_flow: usize, sink: RBInput<Sample, P>, latency_samples: usize },
+  ConnectChannel { socket_index: usize, channel_in_flow: usize, sink: RBInput<Sample, P> },
   DisconnectChannel { socket_index: usize, channel_in_flow: usize, rb_shared: Arc<RingBufferShared<Sample, P>> },
 }
 
@@ -82,7 +85,7 @@ struct FlowsReceiverInternal<P: ProxyToSamplesBuffer> {
 
 impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
   #[inline(always)]
-  fn receive(sd: &mut SocketData<P>, sample_rate: u32, ref_instant: Instant, write: bool) -> Command<P> {
+  fn receive(sd: &mut SocketData<P>, sample_rate: u32, clock: &MediaClock, ref_instant: Instant, write: bool) -> Command<P> {
     let mut buf = [0; MTU];
     loop {
       match sd.socket.recv_from(&mut buf) {
@@ -91,7 +94,17 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             error!("received corrupted (too small) packet on flow socket");
             return Command::NoOp;
           }
-          //debug!("received packet");
+          let timestamp = (u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize)
+          .wrapping_mul(sample_rate as usize)
+          .wrapping_add(u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]) as usize) as Clock;
+          // TODO: add timestamp sanity checks with PTP clock
+
+          // TODO: optimize, fetching the hardware clock so often is suboptimal
+          // fetch it every n packets or use timestamped_socket and kernel-level timestamps instead
+          if let Some(now) = clock.now_in_timebase(sample_rate.into()) {
+            let latency = wrapped_diff(now, timestamp).clamp(0, i32::MAX as _);
+            sd.actual_latency_samples.fetch_max(latency as _, Ordering::Relaxed);
+          }
 
           if write {
             let num_channels = sd.channels.len();
@@ -100,11 +113,6 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             let _total_num_samples = (recv_size - 9) / sd.bytes_per_sample;
             //let audio_bytes = &buf[9..9+total_num_samples*sd.bytes_per_sample];
             let audio_bytes = &buf[9..recv_size];
-            let timestamp = (u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize)
-              .wrapping_mul(sample_rate as usize)
-              .wrapping_add(u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]) as usize) as Clock;
-
-            // TODO: add timestamp sanity checks with PTP clock
 
             let stride = num_channels * sd.bytes_per_sample;
             let samples_count = audio_bytes.len() / stride;
@@ -210,7 +218,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           if let Some(socket_data) = &mut self.sockets[socket_index] {
             // always run receive to prevent network queue fill when waiting for start_time_rx
             // because network queue is harmful when working at realtime priority
-            Self::receive(socket_data, self.sample_rate, self.ref_instant, start_time_rx.is_none());
+            Self::receive(socket_data, self.sample_rate, &self.clock, self.ref_instant, start_time_rx.is_none());
           } else {
             warn!("got token not bound to any existing socket");
           }
@@ -242,7 +250,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
               }
               let _ = socket;
             }
-            Command::ConnectChannel { socket_index, channel_in_flow, sink, latency_samples } => {
+            Command::ConnectChannel { socket_index, channel_in_flow, sink } => {
               if cfg!(debug_assertions) {
                 for sd in self.sockets.iter().filter_map(|opt|opt.as_ref()) {
                   for ch in sd.channels.iter().filter_map(|opt|opt.as_ref()) {
@@ -252,7 +260,9 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                   }
                 }
               }
-              let timestamp_shift = start_timestamp.map(|start_ts| (0 as ClockDiff).wrapping_sub_unsigned(start_ts).wrapping_add_unsigned(latency_samples.try_into().unwrap())).unwrap_or(0);
+              let socket = self.sockets[socket_index].as_mut().unwrap();
+
+              let timestamp_shift = start_timestamp.map(|start_ts| (0 as ClockDiff).wrapping_sub_unsigned(start_ts).wrapping_add_unsigned(socket.latency_samples.try_into().unwrap())).unwrap_or(0);
 
               // prefer existing sink - this ensures that buffer is erased properly but not excessively
               let sink = if let Some(existing_index) = self.silence_writers.iter().position(|sw|Arc::ptr_eq(sw.sink.shared(), sink.shared())) {
@@ -267,7 +277,6 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                 sink
               };
 
-              let socket = self.sockets[socket_index].as_mut().unwrap();
               let channel_opt = &mut socket.channels[channel_in_flow];
 
               if channel_opt.is_none() {
@@ -277,12 +286,11 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                 sinks.push(sink);
                 *channel_opt = Some(Channel {
                   sinks,
-                  latency_samples,
+                  latency_samples: socket.latency_samples,
                   timestamp_shift,
                 });
               } else {
                 let channel = channel_opt.as_mut().unwrap();
-                debug_assert_eq!(latency_samples, channel.latency_samples);
                 debug_assert!(channel.sinks.capacity() > channel.sinks.len());
                 channel.sinks.push(sink);
               }
@@ -380,16 +388,19 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
   }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug)]
 pub struct FlowInfo {
   pub rx_port: u16,
+  pub channels_map: Vec<BoolVec>,
+  pub latency_samples: u32,
+  pub actual_latency_samples: Arc<AtomicI32>,
 }
 
 pub struct FlowsReceiver<P: ProxyToSamplesBuffer> {
   commands_sender: mpsc::Sender<Command<P>>,
   waker: mio::Waker,
   max_channels: usize,
-  pub flows_info: Arc<RwLock<BTreeMap<usize, FlowInfo>>>,
+  pub flows_info: Arc<RwLock<Vec<Option<FlowInfo>>>>,
 }
 
 impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
@@ -418,7 +429,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     let thread_join = std::thread::Builder::new().name("flows RX".to_owned()).spawn(move || {
       Self::run(rx, poll, srate, ref_instant, clock_recv, start_time_rx, on_transfer, current_timestamp, max_channels);
     }).unwrap();
-    return (Self { commands_sender: tx, waker, max_channels, flows_info: Default::default() }, thread_join);
+    return (Self { commands_sender: tx, waker, max_channels, flows_info: Arc::new(RwLock::new((0..MAX_FLOWS).map(|_|None).collect_vec())) }, thread_join);
   }
   pub async fn shutdown(&self) {
     self.commands_sender.send(Command::Shutdown).await.log_and_forget();
@@ -431,6 +442,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     send_keepalives: bool,
     bytes_per_sample: usize,
     channels_count: usize,
+    latency_samples: usize,
     last_packet_time_arc: Arc<AtomicUsize>,
   ) {
     // TODO: it would be more logical to move socket creation here from channels_subscriber.rs which is already convoluted
@@ -441,8 +453,12 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       v
     }).collect_vec();
     let port = socket.local_addr().unwrap().port();
-    self.flows_info.write().unwrap().insert(local_index, FlowInfo {
+    let als: Arc<AtomicI32> = Arc::new(i32::MIN.into());
+    self.flows_info.write().unwrap()[local_index] = Some(FlowInfo {
       rx_port: port,
+      channels_map: (0..channels_count).map(|_| boolvec![false; self.max_channels]).collect(),
+      latency_samples: latency_samples.try_into().unwrap(),
+      actual_latency_samples: als.clone(),
     });
     self
       .commands_sender
@@ -454,8 +470,10 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
           last_source: None,
           last_packet_time: last_packet_time_arc,
           bytes_per_sample,
+          latency_samples,
           channels: (0..channels_count).map(|_| None).collect(),
           empty_sinks_vecs,
+          actual_latency_samples: als,
         },
       })
       .await
@@ -464,24 +482,36 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
   }
   pub async fn remove_socket(&self, local_index: usize) {
     debug!("removing flow receiver local index={local_index}");
-    self.flows_info.write().unwrap().remove(&local_index);
+    self.flows_info.write().unwrap()[local_index] = None;
     self.commands_sender.send(Command::RemoveSocket { index: local_index }).await.log_and_forget();
     self.waker.wake().log_and_forget();
   }
-  pub async fn connect_channel(&self, local_index: usize, channel_in_flow: usize, sink: RBInput<Sample, P>, latency_samples: usize) {
-    debug!("connecting channel: flow index={local_index}, channel in flow: {channel_in_flow}");
+  pub async fn connect_channel(&self, local_flow_index: usize, channel_in_flow: usize, local_channel_index: usize, sink: RBInput<Sample, P>) {
+    debug!("connecting channel: flow index={local_flow_index}, channel in flow: {channel_in_flow}");
+
+    {
+      let mut flows_info = self.flows_info.write().unwrap();
+      flows_info[local_flow_index].as_mut().unwrap().channels_map[channel_in_flow].set(local_channel_index, true);
+    }
+
     self
       .commands_sender
-      .send(Command::ConnectChannel { socket_index: local_index, channel_in_flow: channel_in_flow, sink, latency_samples })
+      .send(Command::ConnectChannel { socket_index: local_flow_index, channel_in_flow, sink })
       .await
       .log_and_forget();
     self.waker.wake().log_and_forget();
   }
-  pub async fn disconnect_channel(&self, local_index: usize, channel_in_flow: usize, rb_shared: Arc<RingBufferShared<Sample, P>>) {
-    debug!("disconnecting channel: flow index={local_index}, channel in flow: {channel_in_flow}");
+  pub async fn disconnect_channel(&self, local_flow_index: usize, channel_in_flow: usize, local_channel_index: usize, rb_shared: Arc<RingBufferShared<Sample, P>>) {
+    debug!("disconnecting channel: flow index={local_flow_index}, channel in flow: {channel_in_flow}");
+
+    {
+      let mut flows_info = self.flows_info.write().unwrap();
+      flows_info[local_flow_index].as_mut().unwrap().channels_map[channel_in_flow].set(local_channel_index, false);
+    }
+
     self
       .commands_sender
-      .send(Command::DisconnectChannel { socket_index: local_index, channel_in_flow: channel_in_flow, rb_shared })
+      .send(Command::DisconnectChannel { socket_index: local_flow_index, channel_in_flow, rb_shared })
       .await
       .log_and_forget();
     self.waker.wake().log_and_forget();

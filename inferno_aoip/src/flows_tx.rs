@@ -34,6 +34,9 @@ const BUFFERED_SAMPLES_PER_CHANNEL: usize = 65536;
 pub const SELECT_THRESHOLD: Duration = Duration::from_millis(100);
 pub const MIN_SLEEP: Duration = Duration::from_millis(0); // to save CPU cycles, TODO: make it configurable via some "eco mode" flag
 
+// it's better to have the clock in the past than in the future - otherwise Dante devices receiving from us go mad and fart
+const CLOCK_OFFSET_NS: ClockDiff = -500_000;
+
 pub type SamplesRequestCallback = Box<dyn FnMut(Clock, usize, &mut [Sample]) + Send + 'static>;
 
 struct Flow {
@@ -74,6 +77,7 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
   clock: MediaClock,
   channels_sources: Vec<RBOutput<Sample, P>>,
   send_latency_samples: usize,
+  clock_offset_samples: ClockDiff,
   timestamp_shift: ClockDiff,
   current_timestamp: Arc<AtomicUsize>,
   on_transfer: Option<Box<dyn Fn() + Send>>,
@@ -82,7 +86,7 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
 
 impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
   fn now(&self) -> Option<Clock> {
-    self.clock.now_in_timebase(self.sample_rate as u64)
+    self.clock.now_in_timebase(self.sample_rate as u64).map(|ts|ts.wrapping_add_signed(self.clock_offset_samples))
   }
 
   #[inline(always)]
@@ -91,7 +95,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     let mut pbuff = [0u8; MTU];
     let sample_rate = self.sample_rate;
     let max_lag_samples = MAX_LAG_SAMPLES;
-    if let Some(now) = self.clock.now_in_timebase(sample_rate as u64) {
+    if let Some(now) = self.now() {
       let mut max_missing_samples = 0;
       for flow in &mut self.flows.iter_mut().filter_map(|opt|opt.as_mut()) {
         if flow.expired.load(Ordering::Relaxed) {
@@ -194,7 +198,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     set_current_thread_realtime(89);
     loop {
       let min_next_ts = self.flows.iter().filter_map(|opt|opt.as_ref()).filter(|flow|!flow.expired.load(Ordering::Relaxed)).map(|&ref flow|flow.next_ts).min_by(|&a, &b| wrapped_diff(a, b).cmp(&0));
-      let sleep_duration = min_next_ts.and_then(|ts|self.clock.system_clock_duration_until(ts, sample_rate as u64)).unwrap_or(std::time::Duration::from_secs(20)).max(MIN_SLEEP);
+      let sleep_duration = min_next_ts.and_then(|ts|self.clock.system_clock_duration_until(ts.wrapping_add_signed(self.clock_offset_samples), sample_rate as u64)).unwrap_or(std::time::Duration::from_secs(20)).max(MIN_SLEEP);
       let mut process_events = (counter.0%16)==0;
       counter += 1;
 
@@ -299,6 +303,7 @@ impl FlowsTransmitter {
       channels_sources: channels_outputs,
       send_latency_samples: latency.try_into().unwrap(), // TODO in ALSA plugin should be 0, the more the worse because aplay wants to fill the whole buffer
       timestamp_shift: (0 as ClockDiff).wrapping_sub_unsigned(latency.try_into().unwrap()),
+      clock_offset_samples: (CLOCK_OFFSET_NS as i64 * sample_rate as i64 / 1_000_000_000i64).try_into().unwrap(),
       current_timestamp,
       on_transfer,
       /* callback: Box::new(|mut timestamp: Clock, ch_index: usize, buffer: &mut [Sample]| {

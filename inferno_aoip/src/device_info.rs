@@ -1,5 +1,7 @@
 use std::net::Ipv4Addr;
 
+use netdev::mac::MacAddr;
+
 #[derive(Clone)]
 pub struct Channel {
   pub factory_name: String,
@@ -11,6 +13,10 @@ pub type DeviceId = [u8; 8];
 #[derive(Clone)]
 pub struct DeviceInfo {
   pub ip_address: Ipv4Addr,
+  pub netmask: Ipv4Addr,
+  pub gateway: Ipv4Addr,
+  pub mac_address: MacAddr,
+
   pub board_name: String,
   pub manufacturer: String,
   pub model_name: String,
@@ -20,6 +26,7 @@ pub struct DeviceInfo {
   pub vendor_string: String,
   pub friendly_hostname: String, // TODO limit length to 31, otherwise DC ignores the device
   pub factory_hostname: String, // TODO as above
+  
   pub rx_channels: Vec<Channel>,
   pub tx_channels: Vec<Channel>,
   pub bits_per_sample: u8,

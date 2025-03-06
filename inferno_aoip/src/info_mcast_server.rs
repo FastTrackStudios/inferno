@@ -1,9 +1,11 @@
+use crate::channels_subscriber::ChannelsSubscriber;
 use crate::common::*;
 use crate::byte_utils::*;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::mcast::make_packet;
 use crate::MediaClock;
 use crate::{byte_utils::write_str_to_buffer, device_info::DeviceInfo};
+use std::sync::atomic::Ordering;
 use std::sync::RwLock;
 use std::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -12,6 +14,7 @@ use std::{
 };
 use bytebuffer::ByteBuffer;
 use itertools::Itertools;
+use tokio::sync::watch;
 use tokio::time::interval;
 use tokio::{
   select,
@@ -40,6 +43,7 @@ struct Multicaster<'s> {
   heartbeat_destination: SocketAddr,
   send_buffer: [u8; SEND_BUFFER_SIZE],
   clock: Arc<RwLock<MediaClock>>,
+  channels_subscriber: Option<Arc<ChannelsSubscriber>>,
 }
 
 impl<'s> Multicaster<'s> {
@@ -67,6 +71,7 @@ impl<'s> Multicaster<'s> {
       ),
       send_buffer: [0; SEND_BUFFER_SIZE],
       clock,
+      channels_subscriber: None,
     };
     write_str_to_buffer(&mut r.vendor, 0, 8, &self_info.vendor_string);
     return r;
@@ -149,7 +154,7 @@ impl<'s> Multicaster<'s> {
     bytes.set_endian(bytebuffer::Endian::BigEndian);
  
     let freq_offset_opt = self.clock.read().unwrap().get_overlay().as_ref().map(|clkovl| {
-      let freq_offset_f = (clkovl.freq_scale * 1_000_000_000f64).round();
+      let freq_offset_f = (clkovl.freq_scale_including_hw() * 1_000_000_000f64).round();
       if i32::MIN as f64 <= freq_offset_f && freq_offset_f <= i32::MAX as f64 {
         Some(freq_offset_f as i32)
       } else {
@@ -165,7 +170,7 @@ impl<'s> Multicaster<'s> {
       bytes.write_u16(ctr);
       bytes.write_u16(0);
       bytes.write_i32(freq_offset);
-      //debug!("freq offset {freq_offset}/1000 ppm");
+      debug!("freq offset {freq_offset}/1000 ppm");
 
       /* bytes.write_bytes(&[
         0x00, 0x24, 0x80, 0x00,
@@ -179,27 +184,27 @@ impl<'s> Multicaster<'s> {
       ]); */
 
       // rx latency:
-      bytes.write_u16(56); // 32
-      bytes.write_u16(0x8003);
-      bytes.write_u16(4);
-      bytes.write_u16(44); // maybe content length??? // 32
-      bytes.write_u16(ctr);
-      bytes.write_u16(0);
-      bytes.write_u16(8); // 2
-      bytes.write_u16(0);
-      bytes.write_u16(24);
-      bytes.write_u16(0);
-      bytes.write_u32(self.self_info.sample_rate);
-      bytes.write_u32(20); // latency in samples, here: 420
-      bytes.write_u32(0);
-      bytes.write_u32(0);
-      bytes.write_u32(0);
-      bytes.write_u32(0);
-      bytes.write_u32(0);
-      bytes.write_u32(0);
-      bytes.write_u32(0);
-
-      //bytes.write_u32(32); // 666
+      if let Some(chsub) = self.channels_subscriber.as_ref() {
+        let flows_info = chsub.flows_info();
+        let flows_info = flows_info.read().unwrap();
+        let flows_count = flows_info.len() as u16;
+        bytes.write_u16(24 + flows_count * 4);
+        bytes.write_u16(0x8003);
+        bytes.write_u16(4);
+        bytes.write_u16(12 + flows_count * 4); // content length
+        bytes.write_u16(ctr);
+        bytes.write_u16(0);
+        bytes.write_u16(flows_count); // number of flows
+        bytes.write_u16(0);
+        bytes.write_u16(24);
+        bytes.write_u16(0);
+        bytes.write_u32(self.self_info.sample_rate);
+        
+        for opt in flows_info.iter() {
+          let latency = opt.as_ref().map(|fi|fi.actual_latency_samples.swap(0, Ordering::Relaxed)).unwrap_or(0);
+          bytes.write_u32(latency.clamp(0, i32::MAX) as u32);
+        }
+      }
   
       /* bytes.write_bytes(&[
         0x00, 0x1c, 0x80, 0x04,
@@ -207,35 +212,25 @@ impl<'s> Multicaster<'s> {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
       ]); */
 
+      // TODO: this is response to 0738002100000064
       let mut clkstatus = ByteBuffer::new();
+      clkstatus.set_endian(bytebuffer::Endian::BigEndian);
       clkstatus.write_bytes(&[
-        0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x9f
-        ]);
-      clkstatus.write_i32(freq_offset);
-      // TODO
-      clkstatus.write_bytes(&[
-        /* own MAC: */ 0x00, 0x1d, 0xc1, 0xAA, 0xBB, 0xCC, 0x00, 0x00,
-        /* Master MAC: */ 0x00, 0x1d, 0xc1, 0x11, 0x11, 0x33, 0x00, 0x00,
-        /* Master MAC: */ 0x00, 0x1d, 0xc1, 0x11, 0x11, 0x33,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x34, 0x00, 0x09, 0x00, 0x00, 0x02, 0x94, 0x00, 0x00,
-        0x00, 0x03, 0x0d, 0x40, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x60, 0x0c, 0x00,
-        0x00, 0x00, 0x00, 0x0c, 0x00, 0x98, 0x00, 0x20, 0x00, 0x03, 0x00, 0x00, 0x00, 0x68, 0x10, 0x00,
-        0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x07,
-        0x00, 0x01, 0x00, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x03,
-        0x00, 0x01, 0x00, 0x03, 0x02, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x07,
-        0x00, 0x03, 0x00, 0x07, 0x00, 0xb8, 0x00, 0x04
+        0x00, 0x03, 0x00, 0x03 /* 0x01 = PLL not locked */, 0x00, 0x00, 0x00, 0xff,
       ]);
-      clkstatus.write_bytes(&self.self_info.factory_device_id);
+      clkstatus.write_i32(freq_offset);
       clkstatus.write_bytes(&[
-        /* device id (master): */ 0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x11, 0x11, 0x33, /* device id (master): */  0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x11, 0x11, 0x33,
-        0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00
+        /* own MAC: */ 0,0,0,0,0,0, 0x00, 0x00,
+        /* master MAC: */ 0,128,128,16,16,16, 0x00, 0x00,
+        /* master MAC: */ 0,128,128,16,16,255, 0x00, 0x00,
+        0x00, 0 /* was 1 */, 0x00, 0 /* was 0x34 */, 0x00, 0 /* was 9 */, 0x00, 0x00, 0 /* was 2 */, 0 /* was 34 */, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0 /* was 6 */, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0 /* was 0x60 */, 0 /* was 0xc */, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0 /* was 1 */, 0x00, 0x00, 0x00, 0 /* was 0x68 */, 0 /* was 0x10 */, 0x00,
+        0x00, 0x00, 0x00, 0 /* was 1 */, 0 /* was 1 */, 0 /* was 2 */, 0 /* was 1 */, 0x00, 0x00, 0x00, 0x00, 0 /* was 0x11 */, 0x00, 0 /* was 0x9 */, 0x00, 0 /* was 0x7 */      
       ]);
 
-      // here lives the Clock Status:
-      // TODO: this is response to 0738002100000064:
-      // TODO: Clock Domain Mismatch is we send this
-      //self.send(self.device_info_destination, 0xffff, [0x07, 0x2a /*XXX*/, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00], clkstatus.as_bytes()).await;
+      self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00], clkstatus.as_bytes()).await;
     } else {
       debug!("no clock available");
     }
@@ -313,18 +308,25 @@ impl<'s> Multicaster<'s> {
     ).await; */
  
 
+    let mut bytes = ByteBuffer::new();
+    bytes.set_endian(bytebuffer::Endian::BigEndian);
+    bytes.write_bytes(&[
+      0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x01
+    ]);
+    bytes.write_bytes(&self.self_info.mac_address.octets());
+    bytes.write_bytes(&self.self_info.ip_address.octets());
+    bytes.write_bytes(&self.self_info.netmask.octets());
+    bytes.write_bytes(&self.self_info.gateway.octets());
+    bytes.write_bytes(&self.self_info.gateway.octets()); // DNS? doesn't really matter.
+    bytes.write_bytes(&[
+      0x00, 0x18, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]);
     // TODO
     // necessary, this is response to 0738001300000064:
-    /* self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00],
-      &[
-        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x01, /* own MAC address: */ 0x00, 0x1d, 0xc1, 0xAA, 0xBB, 0xCC,
-        /* ip address: */ 0x0a, 0x03, 0x13, 0x37,
-        /* netmask: */ 0xff, 0xff, 0xF0, 0x00,
-        /* gw & dns, not sure: */ 0x0a, 0x03, 0x13, 0x01, 0x0a, 0x03, 0x13, 0x02,
-        0x00, 0x18, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-      ]
-    ).await; */
+    self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00],
+      bytes.as_bytes()
+    ).await;
 
   }
 }
@@ -333,6 +335,7 @@ pub async fn run_server(
   self_info: Arc<DeviceInfo>,
   mut rx: mpsc::Receiver<MulticastMessage>,
   clock: Arc<RwLock<MediaClock>>,
+  mut channels_sub_rx: watch::Receiver<Option<Arc<ChannelsSubscriber>>>,
   shutdown: BroadcastReceiver<()>,
 ) {
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.info_request_port, shutdown).await;
@@ -376,6 +379,9 @@ pub async fn run_server(
       },
       _ = heartbeat_interval.tick() => {
         mcaster.send_heartbeat().await;
+      },
+      _ = channels_sub_rx.changed() => {
+        mcaster.channels_subscriber = channels_sub_rx.borrow_and_update().clone();
       }
       // TODO receive shutdown properly, currently Ctrl-C doesn't work if there is error binding to socket
     };

@@ -35,6 +35,7 @@ bool_vec = "0.2.1"
 bytemuck = "1.17.1"
 usrvclock = { path = "../usrvclock-rs" }
 arrayvec = "0.7.6"
+netdev = "0.32.0"
 
 [dependencies.serde]
 version = "1.0.159"

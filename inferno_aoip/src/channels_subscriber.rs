@@ -69,7 +69,7 @@ pub struct SubscriptionInfo {
 pub struct ChannelsSubscriber {
   commands_sender: mpsc::Sender<Command>,
   subscriptions_info: Arc<RwLock<Vec<Option<SubscriptionInfo>>>>,
-  flows_info: Arc<RwLock<BTreeMap<usize, FlowInfo>>>,
+  flows_info: Arc<RwLock<Vec<Option<FlowInfo>>>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -148,7 +148,7 @@ impl ChannelsSubscriber {
   pub fn channel_status(&self, channel_index: usize) -> Option<SubscriptionInfo> {
     self.subscriptions_info.read().unwrap()[channel_index].clone()
   }
-  pub fn flows_info(&self) -> Arc<RwLock<BTreeMap<usize, FlowInfo>>> {
+  pub fn flows_info(&self) -> Arc<RwLock<Vec<Option<FlowInfo>>>> {
     self.flows_info.clone()
   }
 }
@@ -224,7 +224,7 @@ impl ChannelsBuffering<ExternalBuffer<Atomic<Sample>>> for ExternalBuffering {
     // TODO: this is a bit illogical, flows_recv.{connect_channel, disconnect_channel} should be in one place
     let rb_shared = self.ring_buffers[channel_index].clone();
     tokio::spawn(async move {
-      flows_recv.disconnect_channel(flow_index, channel_in_flow, rb_shared).await;
+      flows_recv.disconnect_channel(flow_index, channel_in_flow, channel_index, rb_shared).await;
     });
   }
 }
@@ -779,6 +779,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
           self.ref_instant.elapsed().as_secs() as _,
         );
         let time_arc = flow.last_packet_time.clone();
+        let latency_samples = flow.latency_samples;
         flows_locked[flow_index] = Some(flow);
         let flows_recv = self.flows_recv.clone();
         let media_addr = advbundle.media_addr;
@@ -801,6 +802,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
               false,
               (advbundle.bits_per_sample as usize) / 8,
               advbundle.tx_channels_per_flow,
+              latency_samples,
               time_arc,
             )
             .await;
@@ -839,6 +841,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
 
           let time_arc = flow.last_packet_time.clone();
           let tx_channels = flow.tx_channels.clone();
+          let latency_samples = flow.latency_samples;
           flows_locked[flow_index] = Some(flow);
 
           let updates = chunk
@@ -905,6 +908,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
                 true,
                 (first.bits_per_sample as usize) / 8,
                 tx_channels.len(),
+                latency_samples,
                 time_arc,
               )
               .await;
@@ -978,7 +982,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
           if let Some(sink) = sink_opt {
             let flows_recv = self.flows_recv.clone();
             tokio::spawn(async move {
-              flows_recv.connect_channel(remote.local_flow_index, remote.channel_in_flow, sink, latency_samples).await;
+              flows_recv.connect_channel(remote.local_flow_index, remote.channel_in_flow, chi, sink).await;
             });
           }
           subscription.remote = Some(remote);

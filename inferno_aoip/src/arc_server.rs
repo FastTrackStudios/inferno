@@ -5,11 +5,13 @@ use crate::device_info::DeviceInfo;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::req_resp;
 use crate::protocol::req_resp::HEADER_LENGTH;
+use crate::flows_rx::MAX_FLOWS as MAX_RX_FLOWS;
 use bytebuffer::{ByteBuffer, Endian};
 use log::{error, info, trace};
 use std::{cmp::min, sync::Arc};
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::watch;
+
 
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
@@ -51,8 +53,8 @@ pub async fn run_server(
               0x08, // was 8
               0x00,
               0x02, // was 2
-              0x00, // max receive flows MSB
-              0x08, // max receive flows LSB
+              H(MAX_RX_FLOWS as _), // max receive flows MSB
+              L(MAX_RX_FLOWS as _), // max receive flows LSB
               0x00,
               0x04, // was 4, 0 also occurs in some devices
               0x00,
@@ -306,54 +308,96 @@ pub async fn run_server(
         0x2201 => {
           // Create multicast TX flow
         }
-        0x3200 => { // used by DC
-          // probably query RX flows
-          // ???
-          let mut bytes = ByteBuffer::new();
-          if let Some(chsub) = subscriber.as_ref() {
-            if let Some(flow) = chsub.flows_info().read().unwrap().values().next() {
-              bytes.set_endian(Endian::BigEndian);
-              //bytes.write_u8(crate::flows_rx::MAX_FLOWS.try_into().unwrap());
-              bytes.write_u8(2);
-              let mut flow_positions = vec![];
-              bytes.write_u8(1);
-              bytes.write_u16(HEADER_LENGTH as u16 + 6);
-              bytes.write_u16(0); // was 0x48, offset of next descriptor
+        0x3200 => { // query RX flows
+          let mut response = ByteBuffer::new();
+          response.set_endian(Endian::BigEndian);
+          let code = if let Some(chsub) = subscriber.as_ref() {
 
-              flow_positions.push(bytes.get_wpos());
-              bytes.write_u16(1);
-              bytes.write_u16(1);
-              bytes.write_u32(self_info.sample_rate);
-              bytes.write_bytes(&[0x00, 0x00, 0x00, 0x18, 0x00, 0x01, 0x00, 0x02,
-                0x00, 0x01, 0x00, /* offsets: */ 0x30, 0x00, 0x2a, 0x00, 0x2c, 0x00, 0x38,
-                /* bitmask channel 1: */ 0x00, 0x01,
-                /* bitmask channel 2: */ 0x00, 0x02,
-                0x00, 0x00,
-                0x08, 0x02
-              ]);
-              bytes.write_u16(flow.rx_port);
-              bytes.write_bytes(&self_info.ip_address.octets());
-              bytes.write_bytes(&[
-                0x00, 0x09, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, /* latency ns, 4B: */ 0x00, 0x4c, 0x4b, 0x40, 0x00, 0x00, 0x00, 0x00,
-              ]);
-
-              /* bytes.write_bytes(&[
-                0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0xbb, 0x80, 0x00, 0x00, 0x00, 0x18, 0x00, 0x01, 0x00, 0x02,
-                0x00, 0x01, 0x00, 0x68, 0x00, 0x62, 0x00, 0x64, 0x00, 0x70, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00,
-                0x08, 0x02, 0x38, 0x05,
-              ]);
-              bytes.write_bytes(&self_info.ip_address.octets());
-              bytes.write_bytes(&[
-                0x00, 0x09, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x42, 0x40, 0x00, 0x00, 0x00, 0x00
-              ]); */
-            } else {
-              bytes.write_bytes(&[2, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            let flows_info = chsub.flows_info();
+            let flows_info = flows_info.read().unwrap();
+            let content = request.content();
+            let start_index = make_u16(content[2], content[3]) as usize - 1;
+            let remaining = flows_info.iter().skip(start_index).filter(|opt|opt.is_some()).count();
+            let limit = 12;
+            let in_this_response = min(limit, remaining);
+            
+            response.write_u8(in_this_response as _);
+            response.write_u8(in_this_response as _);
+            for _ in 0..in_this_response {
+              response.write_u16(0);
             }
+            while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
+              response.write_u16(0);
+            }
+            let mut flow_positions = vec![];
+            for (flow_index, flow_info_opt) in flows_info.iter().enumerate().skip(start_index).take(in_this_response) {
+              // 58 bytes per descriptor (with 2 channels and 2-word mask)
+              // 46 + channels_per_flow * (bytes_per_mask + 2)
+              if flow_info_opt.is_none() { continue; }
+              let flow_info = flow_info_opt.as_ref().unwrap();
+
+              let descriptor1_pos = response.get_wpos() + HEADER_LENGTH;
+              response.write_u16(0x0802);
+              response.write_u16(flow_info.rx_port);
+              response.write_bytes(&self_info.ip_address.octets());
+
+              let descriptor2_pos = response.get_wpos() + HEADER_LENGTH;
+              response.write_bytes(&[0x00, 0x09, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00]);
+              response.write_u32((flow_info.latency_samples as u64 * 1_000_000_000u64 / self_info.sample_rate as u64).try_into().unwrap());
+              response.write_u32(0);
+
+              let words_per_bitmask = 2;
+              let bitmasks_start = response.get_wpos() + HEADER_LENGTH;
+              for mask in &flow_info.channels_map {
+                let mut chi = 0;
+                for _ in 0..words_per_bitmask {
+                  let mut word: u16 = 0;
+                  let mut single_bit = 1;
+                  while single_bit != 0 {
+                    word |= if mask.get(chi).unwrap_or(false) { single_bit } else { 0 };
+                    chi += 1;
+                    single_bit <<= 1;
+                  }
+                  response.write_u16(word);
+                }
+              }
+
+              flow_positions.push(response.get_wpos() + HEADER_LENGTH);
+              response.write_u16((flow_index + 1) as _);
+              response.write_u16(1);
+              response.write_u32(self_info.sample_rate);
+              response.write_bytes(&[0x00, 0x00, 0x00, 0x18, 0x00, 0x01]);
+              response.write_u16(flow_info.channels_map.len() as _); // was 2
+              response.write_u16(words_per_bitmask as _); // 2-byte-words per bitmask, was 1
+
+              response.write_u16(descriptor1_pos as _);
+              for i in 0..flow_info.channels_map.len() {
+                response.write_u16((bitmasks_start + i*2*words_per_bitmask) as _);
+              }
+              response.write_u16(descriptor2_pos as _);
+            }
+
+            response.set_wpos(2);
+            for pos in flow_positions {
+              response.write_u16(pos as _);
+            }
+
+            /* bytes.write_bytes(&[
+              0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0xbb, 0x80, 0x00, 0x00, 0x00, 0x18, 0x00, 0x01, 0x00, 0x02,
+              0x00, 0x01, 0x00, 0x68, 0x00, 0x62, 0x00, 0x64, 0x00, 0x70, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00,
+              0x08, 0x02, 0x38, 0x05,
+            ]);
+            bytes.write_bytes(&self_info.ip_address.octets());
+            bytes.write_bytes(&[
+              0x00, 0x09, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x42, 0x40, 0x00, 0x00, 0x00, 0x00
+            ]); */
+            if remaining > in_this_response { 0x8112 } else { 1 }
           } else {
-            bytes.write_bytes(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-          }
-          conn.respond(bytes.as_bytes()).await;
-        } 
+            response.write_bytes(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            1
+          };
+          conn.respond_with_code(code, response.as_bytes()).await;
+        }
 
         0x1100 => { // used by DC
           // received unknown opcode1 0x1100, content 00130201820482050210021182188219830183028306031003110303802100f08060002200630064

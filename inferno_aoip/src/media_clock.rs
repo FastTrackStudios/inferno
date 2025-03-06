@@ -24,10 +24,6 @@ pub type FineClock = u64;
 /// Signed version of the high-precision clock. For clock deltas.
 pub type FineClockDiff = i64;
 
-// it's better to have the clock in the past than in the future - otherwise Dante devices receiving from us go mad and fart
-// TODO: do it only for TX
-const CLOCK_OFFSET_NS: FineClockDiff = -500_000;
-
 
 #[derive(Clone)]
 pub struct MediaClock {
@@ -52,7 +48,6 @@ impl MediaClock {
     &self.overlay
   }
   pub fn update_overlay(&mut self, mut overlay: ClockOverlay) {
-    overlay.shift = overlay.shift.wrapping_add(CLOCK_OFFSET_NS);
     if let Some(cur_overlay) = self.overlay {
       let cur_ovl_time = cur_overlay.now_ns();
       let new_ovl_time = overlay.now_ns();

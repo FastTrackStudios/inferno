@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, env, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::Arc};
 
+use netdev::mac::MacAddr;
+
 use crate::{Channel, DeviceInfo};
 use crate::protocol::proto_arc::PORT as ARC_PORT;
 use crate::protocol::proto_cmc::PORT as CMC_PORT;
@@ -32,15 +34,49 @@ fn create_self_info(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr
   });
 
   // TODO make hostname and sample rate configurable from DC
-  let friendly_hostname = settings.get("NAME").map(|s|s.clone()).unwrap_or_else(||
-    format!("{app_name} {}", hex::encode(&my_ipv4.octets()))
+  let friendly_hostname = settings.get("NAME").map(|s| {
+    if s.len() > 31 { s[0..31].to_owned() } else { s.clone() }
+  }).unwrap_or_else(||
+    format!("{} {}", if app_name.len() > 22 { &app_name[0..22] } else { &app_name }, hex::encode(&my_ipv4.octets()))
   );
+  let short_app_name = if short_app_name.len() > 14 { &short_app_name[0..14] } else { short_app_name };
 
   let sample_rate = settings.get("SAMPLE_RATE").
     map(|s|s.parse().expect("invalid SAMPLE_RATE, must be integer")).unwrap_or(48000);
-
+  
+  let mut netmask = Ipv4Addr::new(0,0,0,0);
+  let mut gateway = Ipv4Addr::new(0,0,0,0);
+  let mut mac_address = MacAddr::zero();
+  for iface in netdev::get_interfaces() {
+    let mut our_iface = false;
+    for network in iface.ipv4 {
+      if network.addr() == my_ipv4 {
+        netmask = network.netmask();
+        our_iface = true;
+        break;
+      }
+    }
+    if our_iface {
+      if let Some(gws) = iface.gateway {
+        for gw in gws.ipv4 {
+          if (gw.to_bits() & netmask.to_bits()) == (my_ipv4.to_bits() & netmask.to_bits()) {
+            gateway = gw;
+            break;
+          }
+        }
+      }
+      if let Some(mac) = iface.mac_addr {
+        mac_address = mac;
+      }
+      break;
+    }
+  }
+  
   let mut result = DeviceInfo {
     ip_address: my_ipv4,
+    netmask,
+    gateway,
+    mac_address,
     board_name: "Inferno-AoIP".to_owned(),
     manufacturer: "Inferno-AoIP".to_owned(),
     model_name: app_name.to_owned(),

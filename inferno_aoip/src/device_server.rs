@@ -70,7 +70,6 @@ impl DeviceServer {
     let clock_receiver = start_clock_receiver(settings.clock_path.clone());
 
     info!("waiting for clock");
-    // MAYBE TODO refactor to tokio::sync::watch
     let shared_media_clock = make_shared_media_clock(&clock_receiver).await;
     info!("clock ready");
 
@@ -81,11 +80,11 @@ impl DeviceServer {
     tasks.append(&mut vec![
       tokio::spawn(crate::arc_server::run_server(
         self_info.clone(),
-        channels_sub_rx,
+        channels_sub_rx.clone(),
         shdn_recv1,
       )),
       tokio::spawn(crate::cmc_server::run_server(self_info.clone(), shdn_recv2)),
-      tokio::spawn(crate::info_mcast_server::run_server(self_info.clone(), mcast_rx, shared_media_clock.clone(), shdn_recv3)),
+      tokio::spawn(crate::info_mcast_server::run_server(self_info.clone(), mcast_rx, shared_media_clock.clone(), channels_sub_rx, shdn_recv3)),
     ]);
 
     info!("all common tasks spawned");
