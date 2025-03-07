@@ -946,9 +946,9 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     tx0.send(resolved).await.log_and_forget();
     drop(tx0);
     while let Some(updates) = rx.recv().await {
-      trace!("recv something");
+      trace!("got update from channel");
       let mut changed_channels = vec![];
-      let now = self.media_clock.read().unwrap().now_in_timebase(self.self_info.sample_rate as u64);
+      let now = self.media_clock.write().unwrap().now_in_timebase(self.self_info.sample_rate as u64);
       let now = match now {
         Some(v) => v,
         None => {

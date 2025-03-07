@@ -69,11 +69,17 @@ pub async fn run_server(
           let rx_ip = Ipv4Addr::from(ip_bytes);
 
           info!("{hostname} requesting flow {rx_flow_name} of channel indices {channel_indices:?} at {sample_rate}Hz {bits_per_sample}bit {fpp} fpp to {rx_ip}:{rx_port}");
+          if channel_indices.iter().flatten().find(|&&chi| chi >= self_info.tx_channels.len()).is_some() {
+            error!("too large channel number, returning error");
+            conn.respond_with_code(0x0302u16 /* ??? TODO */, &[]).await;
+          }
           if sample_rate != self_info.sample_rate {
+            error!("sample rate mismatch, returning error");
             conn.respond_with_code(FlowControlError::SampleRateMismatch as u16, &[]).await;
             continue;
           }
           if fpp > FPP_MAX {
+            error!("too large fpp, returning error");
             conn.respond_with_code(0x0302u16 /* TODO */, &[]).await;
             continue;
           }

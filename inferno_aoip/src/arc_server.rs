@@ -6,6 +6,7 @@ use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::req_resp;
 use crate::protocol::req_resp::HEADER_LENGTH;
 use crate::flows_rx::MAX_FLOWS as MAX_RX_FLOWS;
+use crate::flows_tx::MAX_FLOWS as MAX_TX_FLOWS;
 use bytebuffer::{ByteBuffer, Endian};
 use log::{error, info, trace};
 use std::{cmp::min, sync::Arc};
@@ -36,7 +37,7 @@ pub async fn run_server(
         0x1000 => {
           let txnum = self_info.tx_channels.len() as u16;
           let rxnum = self_info.rx_channels.len() as u16;
-          // almost the same for all devices
+          let total_channels_wtf = txnum + rxnum; // ??? not actually total number of channels but in some devices it is
           conn
             .respond(&[
               0, // was 0x05
@@ -46,17 +47,17 @@ pub async fn run_server(
               H(rxnum),
               L(rxnum),
               0x00,
-              0x00, // was 4
+              0x04, // was 4, or 1...
               0x00,
-              0x04, // was 4
+              0x04, // was 4, or 8...
               0x00,
               0x08, // was 8
-              0x00,
-              0x02, // was 2
+              H(MAX_TX_FLOWS as _),
+              L(MAX_TX_FLOWS as _),
               H(MAX_RX_FLOWS as _), // max receive flows MSB
               L(MAX_RX_FLOWS as _), // max receive flows LSB
-              0x00,
-              0x04, // was 4, 0 also occurs in some devices
+              H(total_channels_wtf as _),
+              L(total_channels_wtf as _), // was 4, 0 also occurs in some devices
               0x00,
               0x01, // was 1
               0x00,
@@ -326,14 +327,14 @@ pub async fn run_server(
             for _ in 0..in_this_response {
               response.write_u16(0);
             }
-            while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
-              response.write_u16(0);
-            }
             let mut flow_positions = vec![];
             for (flow_index, flow_info_opt) in flows_info.iter().enumerate().skip(start_index).take(in_this_response) {
               // 58 bytes per descriptor (with 2 channels and 2-word mask)
               // 46 + channels_per_flow * (bytes_per_mask + 2)
               if flow_info_opt.is_none() { continue; }
+              while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
+                response.write_u16(0);
+              }
               let flow_info = flow_info_opt.as_ref().unwrap();
 
               let descriptor1_pos = response.get_wpos() + HEADER_LENGTH;
@@ -362,6 +363,9 @@ pub async fn run_server(
                 }
               }
 
+              while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
+                response.write_u16(0);
+              }
               flow_positions.push(response.get_wpos() + HEADER_LENGTH);
               response.write_u16((flow_index + 1) as _);
               response.write_u16(1);
@@ -440,9 +444,9 @@ pub async fn run_server(
             .await;
         }
         0x3300 => {
-          // ???
-          //conn.respond(&[0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff]).await;
-          conn.respond(&[0u8; 8]).await;
+          // WTF: this is necessary to avoid 'clock domain mismatch' error in DC
+          conn.respond(&[0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff]).await;
+          //conn.respond(&[0u8; 8]).await;
         }
 
         0x3010 => {

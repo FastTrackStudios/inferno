@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::{select, sync::mpsc};
 
 use crate::os_utils::set_current_thread_realtime;
+use crate::protocol::mcast::mcast_packet::process;
 use crate::thread_utils::run_future_in_new_thread;
 use crate::{common::*, DeviceInfo};
 use crate::{media_clock::{ClockOverlay, MediaClock}, net_utils::MTU, protocol::flows_control::FlowHandle, Sample};
@@ -25,7 +26,7 @@ use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RBOutput};
 pub const FPP_MIN: u16 = 2;
 pub const FPP_MAX: u16 = 256;
 pub const FPP_MAX_ADVERTISED: u16 = 32;
-pub const MAX_FLOWS: u32 = 128;
+pub const MAX_FLOWS: u32 = 32;
 pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
 pub const KEEPALIVE_TIMEOUT_SECONDS: Clock = 4;
 pub const MAX_LAG_SAMPLES: usize = 4800;
@@ -85,8 +86,8 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
 }
 
 impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
-  fn now(&self) -> Option<Clock> {
-    self.clock.now_in_timebase(self.sample_rate as u64).map(|ts|ts.wrapping_add_signed(self.clock_offset_samples))
+  fn now(&mut self) -> Option<Clock> {
+    self.clock.now_in_timebase(self.sample_rate as u64)
   }
 
   #[inline(always)]
@@ -115,7 +116,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         pbuff[9..9 + stride * flow.fpp].fill(0);
         while wrapped_diff(now, flow.next_ts) >= 0 {
           pbuff[0] = 2u8; // ???
-          let packet_ts = flow.next_ts/* .wrapping_sub(flow.fpp) */; // ???
+          let packet_ts = flow.next_ts.wrapping_add_signed(self.clock_offset_samples) /* .wrapping_sub(flow.fpp) */; // ???
           let seconds = packet_ts / (sample_rate as Clock);
           let subsec_samples = packet_ts % (sample_rate as Clock);
           pbuff[1..5].copy_from_slice(&(seconds as u32).to_be_bytes());
@@ -167,11 +168,6 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           }
         }
       }
-      /* if max_missing_samples != 0 {
-        let prev = self.send_latency_samples;
-        self.send_latency_samples = (self.send_latency_samples + max_missing_samples).min(4800);
-        warn!("increasing transmit latency {} -> {}", prev, self.send_latency_samples);
-      } */
       self.on_transfer.as_ref().map(|cb| cb());
     } else if self.flows.len() > 0 {
       error!("clock unavailable, can't transmit. is the PTP daemon running?");
@@ -195,11 +191,11 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       }
     }
 
-    set_current_thread_realtime(89);
+    set_current_thread_realtime(81);
     loop {
       let min_next_ts = self.flows.iter().filter_map(|opt|opt.as_ref()).filter(|flow|!flow.expired.load(Ordering::Relaxed)).map(|&ref flow|flow.next_ts).min_by(|&a, &b| wrapped_diff(a, b).cmp(&0));
-      let sleep_duration = min_next_ts.and_then(|ts|self.clock.system_clock_duration_until(ts.wrapping_add_signed(self.clock_offset_samples), sample_rate as u64)).unwrap_or(std::time::Duration::from_secs(20)).max(MIN_SLEEP);
-      let mut process_events = (counter.0%16)==0;
+      let sleep_duration = min_next_ts.and_then(|ts|self.clock.system_clock_duration_until(ts, sample_rate as u64)).unwrap_or(std::time::Duration::from_secs(20)).max(MIN_SLEEP);
+      let mut process_events = (counter.0%32)==0;
       counter += 1;
 
       let command = if sleep_duration < SELECT_THRESHOLD {
@@ -213,7 +209,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           Command::NoOp
         }
       } else {
-        self.current_timestamp.store(usize::MAX, Ordering::Release);
+        self.current_timestamp.store(usize::MAX, Ordering::SeqCst);
         process_events = true;
         select! {
           recv_opt = self.commands_receiver.recv() => {
@@ -338,7 +334,7 @@ impl FlowsTransmitter {
     });
     let srate = self_info.sample_rate;
     // TODO dehardcode latency_ns
-    let thread_join = run_future_in_new_thread("flows TX", move || Self::run(rx, srate, 0 /*TODO*/, channels_outputs, start_time_rx, current_timestamp, on_transfer).boxed_local());
+    let thread_join = run_future_in_new_thread("flows TX", move || Self::run(rx, srate, 1_000_000 /*LATENCY TODO*/, channels_outputs, start_time_rx, current_timestamp, on_transfer).boxed_local());
     return (Self {
       commands_sender: tx,
       self_info: self_info.clone(),

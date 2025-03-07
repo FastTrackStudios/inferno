@@ -50,15 +50,11 @@ const PLUGIN_NAME: [u8; 23] = *b"Inferno virtual device\0";
 
 lazy_static! {
     static ref global_instances: RwLock<BTreeMap<DeviceId, Arc<Mutex<InfernoInstance>>>> = RwLock::new(BTreeMap::new());
-    static ref global_initialized: AtomicBool = false.into();
+    static ref global_initialized: Mutex<bool> = false.into();
 }
 
 fn get_or_create_instance(settings: &Settings) -> Arc<Mutex<InfernoInstance>> {
     let mut instances_locked = global_instances.write().unwrap();
-    if instances_locked.is_empty() {
-        let logenv = env_logger::Env::default().default_filter_or("debug");
-        env_logger::builder().parse_env(logenv).format_timestamp_micros().init();
-    }
     let entry = instances_locked.entry(settings.self_info.factory_device_id);
     entry.or_insert_with(|| {
         
@@ -206,12 +202,13 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         if let Ok(hw_ptr) = ptr.try_into() {
             let ioplug_avail = snd_pcm_ioplug_avail(io, hw_ptr, (*io).appl_ptr);
             let ioplug_hw_avail = snd_pcm_ioplug_hw_avail(io, hw_ptr, (*io).appl_ptr);
-            println!("buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}");
+            println!("XRUN: buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}, hw_ptr {hw_ptr}, appl_ptr {}", (*io).appl_ptr);
         } else {
-            println!("clock discontinuity");
+            println!("severe clock discontinuity");
+            return (-EPIPE).try_into().unwrap(); // report xrun
         }
         
-        return (-EPIPE).try_into().unwrap(); // report xrun
+        return (-libc::EPIPE).try_into().unwrap(); // report xrun
         // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
         // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
     }
@@ -233,6 +230,7 @@ fn get_app_name() -> Option<String> {
 
 unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     println!("plugin_prepare called");
+
     let this = get_private(io);
 
     let channels_areas = snd_pcm_ioplug_mmap_areas(io);
@@ -305,25 +303,30 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
             current_timestamp: this.current_timestamp.clone(),
             on_transfer: Box::new(this.on_transfer.as_ref().clone()),
         };
-        match (*io).stream {  
+        let mut err = false;
+        match (*io).stream {
             SND_PCM_STREAM_CAPTURE => {
                 if common.capturing {
-                    common.commands_sender.blocking_send(Command::StopReceiver).unwrap();
+                    err = common.commands_sender.blocking_send(Command::StopReceiver).is_err();
                 }
-                common.capturing = true;
-                common.commands_sender.blocking_send(Command::StartReceiver(args)).unwrap();
+                common.capturing = !err;
+                err |= common.commands_sender.blocking_send(Command::StartReceiver(args)).is_err();
             },
             SND_PCM_STREAM_PLAYBACK => {
                 if common.playing {
-                    common.commands_sender.blocking_send(Command::StopTransmitter).unwrap();
+                    err = common.commands_sender.blocking_send(Command::StopTransmitter).is_err();
                 }
-                common.playing = true;
-                common.commands_sender.blocking_send(Command::StartTransmitter(args)).unwrap();
+                common.playing = !err;
+                err |= common.commands_sender.blocking_send(Command::StartTransmitter(args)).is_err();
             },
             _ => {
                 error!("unknown stream direction");
                 return -libc::EINVAL;
             }
+        }
+        if err {
+            error!("BUG: error sending to Inferno thread");
+            return -libc::EPIPE;
         }
     }
 
@@ -415,11 +418,15 @@ unsafe extern "C" fn plugin_close(io: *mut snd_pcm_ioplug_t) -> c_int {
     println!("plugin_close called");
     let this = get_private(io);
     {
+        let mut instances_locked = global_instances.write().unwrap();
         // TODO blocking_send inside mutex, risk of deadlock?
-        if let Some(common_mutex) = get_instance(&this.settings) {
+        if let Some(common_mutex) = instances_locked.get(&this.settings.self_info.factory_device_id).map(|a|a.clone()) {
             let common = common_mutex.lock().unwrap();
             if (!common.capturing) && (!common.playing) {
-                common.commands_sender.blocking_send(Command::Shutdown).unwrap();
+                if let Err(e) = common.commands_sender.blocking_send(Command::Shutdown) {
+                    log::error!("BUG: send shutdown via channel failed: {e:?}");
+                }
+                instances_locked.remove(&this.settings.self_info.factory_device_id);
             }
         }
     }
@@ -430,6 +437,15 @@ unsafe extern "C" fn plugin_close(io: *mut snd_pcm_ioplug_t) -> c_int {
 
 
 unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_char, root: *const snd_config_t, conf: *const snd_config_t, stream: snd_pcm_stream_t, mode: c_int) -> c_int {
+
+    {
+        let mut locked_flag = global_initialized.lock().unwrap();
+        if !*locked_flag {
+            let logenv = env_logger::Env::default().default_filter_or("debug");
+            env_logger::builder().parse_env(logenv).format_timestamp_micros().init();
+            *locked_flag = true;
+        }
+    }
 
     let mut config = BTreeMap::<String, String>::new();
     let mut pos = snd_config_iterator_first(conf);
@@ -538,7 +554,8 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         return r;
     }
 
-    let min_samples = 64; // must be power of 2
+    let min_samples = 128;
+    let min_samples_whole_buffer = 1024; // must be power of 2 and >= max receive latency
     let max_samples = 16384;
     let bytes_per_sample = size_of::<Sample>() as u32;
 
@@ -548,7 +565,7 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         return r;
     }
 
-    let buffer_sizes: Vec<std::os::raw::c_uint> = core::iter::successors(Some(min_samples), |n| {
+    let buffer_sizes: Vec<std::os::raw::c_uint> = core::iter::successors(Some(min_samples_whole_buffer), |n| {
         let r = n*2;
         if r > max_samples {
             None
@@ -563,7 +580,7 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         return r;
     }
 
-    let r = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIODS as i32, 1, 8);
+    let r = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIODS as i32, 2, 8);
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIODS returned {r}");
         return r;

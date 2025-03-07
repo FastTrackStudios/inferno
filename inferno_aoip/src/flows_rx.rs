@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use usrvclock::ClockOverlay;
 
-pub const MAX_FLOWS: usize = 128;
+pub const MAX_FLOWS: usize = 32;
 const WAKE_TOKEN: mio::Token = mio::Token(MAX_FLOWS);
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(250);
 pub const CLOSING_SAMPLES_INTERVAL: Duration = Duration::from_millis(1);
@@ -85,7 +85,7 @@ struct FlowsReceiverInternal<P: ProxyToSamplesBuffer> {
 
 impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
   #[inline(always)]
-  fn receive(sd: &mut SocketData<P>, sample_rate: u32, clock: &MediaClock, ref_instant: Instant, write: bool) -> Command<P> {
+  fn receive(sd: &mut SocketData<P>, sample_rate: u32, clock: &mut MediaClock, ref_instant: Instant, write: bool) -> Command<P> {
     let mut buf = [0; MTU];
     loop {
       match sd.socket.recv_from(&mut buf) {
@@ -165,7 +165,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
     let mut may_have_command = false;
     let mut start_timestamp = None;
 
-    set_current_thread_realtime(88);
+    set_current_thread_realtime(80);
     loop {
       let write_to_rbs = self.sockets.iter().find(|opt|opt.is_some()).is_some() || self.silence_writers.len() > 0;
       let timeout = if may_have_command || write_to_rbs {
@@ -218,7 +218,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           if let Some(socket_data) = &mut self.sockets[socket_index] {
             // always run receive to prevent network queue fill when waiting for start_time_rx
             // because network queue is harmful when working at realtime priority
-            Self::receive(socket_data, self.sample_rate, &self.clock, self.ref_instant, start_time_rx.is_none());
+            Self::receive(socket_data, self.sample_rate, &mut self.clock, self.ref_instant, start_time_rx.is_none());
           } else {
             warn!("got token not bound to any existing socket");
           }
@@ -453,7 +453,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       v
     }).collect_vec();
     let port = socket.local_addr().unwrap().port();
-    let als: Arc<AtomicI32> = Arc::new(i32::MIN.into());
+    let als: Arc<AtomicI32> = Arc::new(0.into());
     self.flows_info.write().unwrap()[local_index] = Some(FlowInfo {
       rx_port: port,
       channels_map: (0..channels_count).map(|_| boolvec![false; self.max_channels]).collect(),
