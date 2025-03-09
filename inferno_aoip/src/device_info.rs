@@ -1,16 +1,16 @@
-use std::net::Ipv4Addr;
+use std::{net::Ipv4Addr, sync::{Arc, RwLock}};
 
 use netdev::mac::MacAddr;
 
 #[derive(Clone)]
 pub struct Channel {
   pub factory_name: String,
-  pub friendly_name: String,
+  pub friendly_name: Arc<RwLock<String>>, // Arc is needed only because of Clone requirement, TODO: fix the ALSA plugin
 }
 
 pub type DeviceId = [u8; 8];
 
-#[derive(Clone)]
+#[derive(Clone)] // TODO: this shouldn't need to be clonable, fix the ALSA plugin
 pub struct DeviceInfo {
   pub ip_address: Ipv4Addr,
   pub netmask: Ipv4Addr,

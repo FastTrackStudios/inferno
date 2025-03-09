@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, env, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, env, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::{Arc, RwLock}};
 
 use netdev::mac::MacAddr;
 
@@ -112,7 +112,7 @@ fn create_self_info(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr
   result
 }
 
-#[derive(Clone)]
+#[derive(Clone)] // TODO: this shouldn't need to be clonable, fix the ALSA plugin
 pub struct Settings {
   pub self_info: DeviceInfo,
   pub clock_path: Option<PathBuf>,
@@ -149,12 +149,12 @@ impl Settings {
   }
   pub fn make_rx_channels(&mut self, count: usize) {
     self.self_info.rx_channels = (1..=count)
-      .map(|id| Channel { factory_name: format!("{id:02}"), friendly_name: format!("RX {id}") })
+      .map(|id| Channel { factory_name: format!("{id:02}"), friendly_name: Arc::new(RwLock::new(format!("RX {id}"))) })
       .collect();
   }
   pub fn make_tx_channels(&mut self, count: usize) {
     self.self_info.tx_channels = (1..=count)
-      .map(|id| Channel { factory_name: format!("{id:02}"), friendly_name: format!("TX {id}") })
+      .map(|id| Channel { factory_name: format!("{id:02}"), friendly_name: Arc::new(RwLock::new(format!("TX {id}"))) })
       .collect();
   }
 }

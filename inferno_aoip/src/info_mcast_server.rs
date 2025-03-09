@@ -3,6 +3,7 @@ use crate::common::*;
 use crate::byte_utils::*;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::mcast::make_packet;
+use crate::AtomicSample;
 use crate::MediaClock;
 use crate::{byte_utils::write_str_to_buffer, device_info::DeviceInfo};
 use std::sync::atomic::Ordering;
@@ -44,10 +45,11 @@ struct Multicaster<'s> {
   send_buffer: [u8; SEND_BUFFER_SIZE],
   clock: Arc<RwLock<MediaClock>>,
   channels_subscriber: Option<Arc<ChannelsSubscriber>>,
+  tx_peaks: Arc<Vec<AtomicSample>>,
 }
 
 impl<'s> Multicaster<'s> {
-  pub fn new(self_info: &'s DeviceInfo, server: UdpSocketWrapper, clock: Arc<RwLock<MediaClock>>) -> Multicaster {
+  pub fn new(self_info: &'s DeviceInfo, server: UdpSocketWrapper, clock: Arc<RwLock<MediaClock>>, tx_peaks: Arc<Vec<AtomicSample>>) -> Multicaster {
     let patch_version = env!("CARGO_PKG_VERSION_PATCH").parse::<u16>().unwrap();
     let mut r = Multicaster {
       self_info,
@@ -72,6 +74,7 @@ impl<'s> Multicaster<'s> {
       send_buffer: [0; SEND_BUFFER_SIZE],
       clock,
       channels_subscriber: None,
+      tx_peaks,
     };
     write_str_to_buffer(&mut r.vendor, 0, 8, &self_info.vendor_string);
     return r;
@@ -109,7 +112,7 @@ impl<'s> Multicaster<'s> {
 
     // flags of supported features:
     // 0x14: AES67, Device Lock
-    //       0x01 - ??? (was 1)
+    //       0x01 - ??? (was 1, od 0xd)
     //       0x04 - supports AES67
     //       0x08 - is lockable
     // 0x15: ??? (was 0x50)
@@ -118,7 +121,7 @@ impl<'s> Multicaster<'s> {
     //       0x40 - Network is configurable (supports static addressing)
     // 0x17: Identify device, Sample rate & encoding configuration (was 0xdb)
     content[0x14] = 0;
-    content[0x15] = 0; // XXX
+    content[0x15] = 0;
     content[0x16] = 0x10;
     content[0x17] = 0;
 
@@ -183,12 +186,35 @@ impl<'s> Multicaster<'s> {
         /* TX errors, 4B: */ 0x00, 0x00, 0x00, 0x02, /* RX errors, 4B: */ 0x00, 0x00, 0x00, 0x07,
       ]); // network statistics */
   
-      bytes.write_bytes(&[
+      let total_peaks = self.tx_peaks.len();
+      bytes.write_u16((24 + total_peaks).try_into().unwrap());
+      bytes.write_u16(0x8002);
+      bytes.write_u16(4);
+      bytes.write_u16((12 + total_peaks).try_into().unwrap());
+      bytes.write_u16(ctr);
+      bytes.write_u16(0);
+      bytes.write_u16(self.tx_peaks.len().try_into().unwrap());
+      bytes.write_u16(0);
+      bytes.write_u16(0); // TODO RX
+      bytes.write_u16(0);
+      bytes.write_u16(24);
+      bytes.write_u16(0);
+      for peak in &*self.tx_peaks {
+        let peak_lin = (peak.swap(0, Ordering::Relaxed) as f32) / (Sample::MAX as f32);
+        //debug!("linear peak is {peak_lin}");
+        let peak_log = peak_lin.log10() * 40.0;
+        let byte: u8 = (-peak_log).round().clamp(0.0, 255.0) as u8;
+        bytes.write_u8(byte);
+      }
+      while (bytes.get_wpos() % 4) != 0 {
+        bytes.write_u8(0);
+      }
+      /* bytes.write_bytes(&[
         /* 24 + total ch */ 0x00, 0x28, 0x80, 0x02, 0x00, 0x04, /* 12 + total ch */ 0x00, 0x1c, H(ctr), L(ctr), 0x00, 0x00,
         /* tx channels, 2B: */ 0x00, 0x08, 0x00, 0x00, /* rx channels, 2B: */ 0x00, 0x08, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00,
         /* payload follows */ 0xc1, 0xc1, 0xc1, 0xc1,
         0xc1, 0xc1, 0xc1, 0xc1, 0xc1, 0xa1, 0xc1, 0xc1, 0xc1, 0xc1, 0xc1, 0xc1
-      ]); // volume meters, 0x00 = clipping, higher values = negative dBFS, in -0.5dB steps, WHY didn't they implement that precise meters in DC?!
+      ]); */ // volume meters, 0x00 = clipping, higher values = negative dBFS, in -0.5dB steps, WHY didn't they implement that precise meters in DC?!
 
       // rx latency:
       if let Some(chsub) = self.channels_subscriber.as_ref() {
@@ -241,10 +267,10 @@ impl<'s> Multicaster<'s> {
       0x00, 0x00, /* 44100: */ 0xac, 0x44, 0x00, 0x00, 0xbb, 0x80, 0x00, 0x01, 0x58, 0x88, 0x00, 0x01, 0x77, 0x00]
     ).await; */
 
-    self.send(
+    /* self.send(
       self.device_info_destination, 0xffff, [0x07, 0x2a, 0x10, 0x07, 0, 0, 0, 0],
       &[0, 0, 0, 0]
-    ).await;
+    ).await; */
 
     // this is probably response to 0738008300000064
     /* self.send(
@@ -338,10 +364,11 @@ pub async fn run_server(
   mut rx: mpsc::Receiver<MulticastMessage>,
   clock: Arc<RwLock<MediaClock>>,
   mut channels_sub_rx: watch::Receiver<Option<Arc<ChannelsSubscriber>>>,
+  tx_peaks: Arc<Vec<AtomicSample>>,
   shutdown: BroadcastReceiver<()>,
 ) {
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.info_request_port, shutdown).await;
-  let mut mcaster = Multicaster::new(self_info.as_ref(), server, clock);
+  let mut mcaster = Multicaster::new(self_info.as_ref(), server, clock, tx_peaks);
   mcaster.send_board_info().await;
   mcaster.send_product_info().await;
   let mut heartbeat_interval = interval(Duration::from_secs(1));

@@ -2,14 +2,17 @@ use crate::byte_utils::*;
 use crate::channels_subscriber::ChannelsSubscriber;
 
 use crate::device_info::DeviceInfo;
+use crate::info_mcast_server::MulticastMessage;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::req_resp;
 use crate::protocol::req_resp::HEADER_LENGTH;
 use crate::flows_rx::MAX_FLOWS as MAX_RX_FLOWS;
 use crate::flows_tx::MAX_FLOWS as MAX_TX_FLOWS;
 use crate::flows_control_server::FlowInfo as TXFlowInfo;
+use crate::utils::LogAndForget;
 use bytebuffer::{ByteBuffer, Endian};
-use log::{error, info, trace};
+use log::{error, info, trace, warn};
+use tokio::sync::mpsc::Sender;
 use std::sync::RwLock;
 use std::{cmp::min, sync::Arc};
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
@@ -18,6 +21,7 @@ use tokio::sync::watch;
 
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
+  mcast: Sender<MulticastMessage>,
   mut channels_sub_rx: watch::Receiver<Option<Arc<ChannelsSubscriber>>>,
   tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>>,
   shutdown: BroadcastReceiver<()>,
@@ -134,7 +138,7 @@ pub async fn run_server(
           let content = request.content();
           let start_index = make_u16(content[2], content[3]) - 1;
           let remaining = if subscriber.is_some() { self_info.rx_channels.len().saturating_sub(start_index as usize) } else { 0 };
-          let limit = 16;
+          let limit = 20; // TODO
           let in_this_response = min(limit, remaining);
           trace!("returning {in_this_response} rx channels starting with index {start_index}");
           let mut response = ByteBuffer::new();
@@ -170,7 +174,7 @@ pub async fn run_server(
             response.write_u16(tx_ch_offset);
             response.write_u16(tx_host_offset);
             response.write_u16((strings.get_wpos() + strings_offset) as u16);
-            strings.write_bytes(ch.friendly_name.as_bytes());
+            strings.write_bytes(ch.friendly_name.read().unwrap().as_bytes());
             strings.write_u8(0);
             let status_value: u32 = match &status {
               None => 0,
@@ -290,7 +294,7 @@ pub async fn run_server(
             response.write_u16(channel_id);
             response.write_u16(channel_id);
             response.write_u16((strings.get_wpos() + strings_offset) as u16);
-            strings.write_bytes(ch.friendly_name.as_bytes());
+            strings.write_bytes(ch.friendly_name.read().unwrap().as_bytes());
             strings.write_u8(0);
           }
           response.write_u32(0); // ??? used to be 0,0,0,1, or 1,1,0,9, maybe random memory fragments???
@@ -298,6 +302,77 @@ pub async fn run_server(
 
           let code = if remaining > in_this_response { 0x8112 } else { 1 };
           conn.respond_with_code(code, response.as_bytes()).await;
+        }
+        0x2013 => { // rename TX channel
+          // TODO support multiple renames in request
+          let content = request.content();
+          let channel_id = make_u16(content[4], content[5]);
+          let name_offset = make_u16(content[6], content[7]);
+          let mut response = ByteBuffer::new();
+          let code = match read_0term_str_from_buffer(content, name_offset as usize - HEADER_LENGTH) {
+            Ok(new_name) => {
+              let index = (channel_id-1) as usize;
+              if index < self_info.tx_channels.len() {
+                info!("renaming TX channel id {channel_id} to {new_name}");
+                *self_info.tx_channels[index].friendly_name.write().unwrap() = new_name.to_owned();
+                response.write_bytes(&[0, 1, 0, 0]);
+                response.write_u16(channel_id);
+                1
+              } else {
+                error!("got rename TX channel request with invalid channel number {channel_id}");
+                0 // TODO
+              }
+            }
+            Err(e) => {
+              error!("could not read new channel name from packet: {e:?}");
+              0 // TODO
+            }
+          };
+          conn.respond_with_code(code, response.as_bytes()).await;
+        }
+        0x3001 => { // rename RX channel
+          // TODO support multiple renames in request
+          let content = request.content();
+          let channel_id = make_u16(content[2], content[3]);
+          let name_offset = make_u16(content[4], content[5]);
+          let mut mask = 1; // TODO properly
+          let code = match read_0term_str_from_buffer(content, name_offset as usize - HEADER_LENGTH) {
+            Ok(new_name) => {
+              let index = (channel_id-1) as usize;
+              if index < self_info.rx_channels.len() {
+                info!("renaming RX channel id {channel_id} to {new_name}");
+                *self_info.rx_channels[index].friendly_name.write().unwrap() = new_name.to_owned();
+                if index >= 8 {
+                  warn!("FIXME: unable to multicast change to rx channel index={index} properly, >= 8");
+                  mask |= 1;
+                } else {
+                  mask |= 1 << index;
+                }
+                1
+              } else {
+                error!("got rename RX channel request with invalid channel number {channel_id}");
+                0 // really?
+              }
+            }
+            Err(e) => {
+              error!("could not read new channel name from packet: {e:?}");
+              0 // really?
+            }
+          };
+          conn.respond_with_code(code, &[]).await;
+          if code==1 {
+            mcast
+              .send(MulticastMessage {
+                start_code: 0xffff,
+                opcode: [0x07, 0x2a, 1, 2, 0, 0, 0, 0],
+                content: [0u8, 1, mask].to_vec(),
+              })
+              .await.log_and_forget();
+            if let Some(chsub) = subscriber.as_ref() {
+              info!("saving state after channel rename");
+              chsub.save_state().await;
+            }
+          }
         }
         0x2200 => { // query TX flows
           let content = request.content();

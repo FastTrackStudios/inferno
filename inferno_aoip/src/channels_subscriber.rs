@@ -142,6 +142,9 @@ impl ChannelsSubscriber {
   pub async fn unsubscribe(&self, local_channel_index: usize) {
     self.commands_sender.send(Command::Unsubscribe { local_channel_index }).await.log_and_forget();
   }
+  pub async fn save_state(&self) {
+    self.commands_sender.send(Command::ForceRefresh).await.log_and_forget();
+  }
   pub async fn shutdown(&self) {
     self.commands_sender.send(Command::Shutdown).await.log_and_forget();
   }
@@ -960,7 +963,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         let first_index = upd.local_channel_indices[0];
         info!(
           "subscription successful, waiting for media: channel {} and {} aliases",
-          self.self_info.rx_channels[first_index].friendly_name,
+          self.self_info.rx_channels[first_index].friendly_name.read().unwrap(),
           upd.local_channel_indices.len() - 1
         );
         debug!("{upd:?}");
@@ -1118,7 +1121,9 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         flows[flow_index] = None;
       }
     }
-    self.notify_channels_change(channels_changed).await;
+    if channels_changed.len() > 0 {
+      self.notify_channels_change(channels_changed).await;
+    }
     join_all(destroy_futures_per_remote.iter_mut().map(|(_, ops)| async move {
       for op in ops {
         op.await;
@@ -1187,21 +1192,25 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     let state = SavedChannelsState { channels:
       self.channels.iter().enumerate().filter_map(|(index, sub)| {
         match sub {
+          // TODO: also save channel names without subscriptions...somehow.
           None => None,
           Some(sub) => Some(SavedChannelState {
             local_channel_id: (index+1) as u16,
-            local_channel_name: self.self_info.rx_channels[index].friendly_name.clone(),
+            local_channel_name: self.self_info.rx_channels[index].friendly_name.read().unwrap().clone(),
             tx_channel_name: sub.tx_channel_name.clone(),
             tx_hostname: sub.tx_hostname.clone()
           })
         }
       }).collect_vec()
     };
-    self.state_storage.save("channels", &state).log_and_forget();
+    self.state_storage.save("rx_channels", &state).log_and_forget();
   }
   async fn load_state(&mut self) {
     let channels = {
-      let result = self.state_storage.load::<SavedChannelsState>("channels");
+      let result = self.state_storage.load::<SavedChannelsState>("rx_channels").or_else(|_| {
+        self.state_storage.load::<SavedChannelsState>("channels")
+        // TODO: remove old state after migration
+      });
       if let Err(e) = result {
         warn!("Unable to load state (this is normal in first run): {e:?}");
         return;
@@ -1212,6 +1221,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
       let lci = chst.local_channel_id as usize-1;
       if lci >= self.channels.len() {
         warn!("loading state containing channel id {} while we have {} channels. State of this channel will be lost on next save.", chst.local_channel_id, self.channels.len());
+        // TODO: this is actually harmful for the UX
         continue;
       }
       self.subscriptions_info.write().unwrap()[lci] = Some(SubscriptionInfo {
@@ -1219,6 +1229,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         tx_channel_name: chst.tx_channel_name.clone(),
         status: SubscriptionStatus::Unresolved,
       });
+      *self.self_info.rx_channels[lci].friendly_name.write().unwrap() = chst.local_channel_name;
       self.subscribe(lci, &chst.tx_channel_name, &chst.tx_hostname).await;
     }
   }

@@ -75,8 +75,10 @@ pub fn start_server(self_info: Arc<DeviceInfo>) -> BroadcasterHandle {
       b.build().unwrap()
     };
     bb = bb.add_service(service(&txch.factory_name, true));
-    if txch.factory_name != txch.friendly_name {
-      bb = bb.add_service(service(&txch.friendly_name, false));
+    let friendly_name_locked = txch.friendly_name.read();
+    let friendly_name = friendly_name_locked.unwrap();
+    if txch.factory_name != *friendly_name {
+      bb = bb.add_service(service(&friendly_name, false));
     }
   }
   

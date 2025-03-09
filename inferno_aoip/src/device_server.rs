@@ -21,20 +21,23 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::Write;
 use std::mem::size_of;
+use std::thread::sleep;
 use std::{env, os};
 use std::net::Ipv4Addr;
 use std::pin::Pin;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use std::net::IpAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast as broadcast_queue, mpsc, watch};
 
 use crate::device_info::{Channel, DeviceInfo};
-use crate::{common::*, MediaClock, RealTimeClockReceiver};
+use crate::{common::*, AtomicSample, MediaClock, RealTimeClockReceiver};
 use crate::flows_control_server::FlowInfo as TXFlowInfo;
 
+const PEAKS_BUFFER_LEN: usize = 24000;
+const PEAKS_ITER_SLEEP: Duration = Duration::from_millis(100);
 
 pub struct DeviceServer {
   pub self_info: Arc<DeviceInfo>,
@@ -46,6 +49,8 @@ pub struct DeviceServer {
   mcast_tx: mpsc::Sender<MulticastMessage>,
   channels_sub_tx: watch::Sender<Option<Arc<ChannelsSubscriber>>>,
   tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>>,
+  tx_peaks: Arc<Vec<AtomicSample>>,
+  rx_peaks: Arc<Vec<AtomicSample>>,
   //tx_inputs: Vec<RBInput<Sample, P>>,
   //tasks: Vec<JoinHandle<()>>,
   shutdown_todo: Pin<Box<dyn Future<Output = ()> + Send>>,
@@ -78,16 +83,19 @@ impl DeviceServer {
 
     let (channels_sub_tx, channels_sub_rx) = watch::channel(None);
     let tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>> = Default::default();
+    let tx_peaks = Arc::new((0..self_info.tx_channels.len()).map(|_|AtomicSample::new(0)).collect_vec());
+    let rx_peaks = Arc::new((0..self_info.rx_channels.len()).map(|_|AtomicSample::new(0)).collect_vec());
 
     tasks.append(&mut vec![
       tokio::spawn(crate::arc_server::run_server(
         self_info.clone(),
+        mcast_tx.clone(),
         channels_sub_rx.clone(),
         tx_flows_info.clone(),
         shdn_recv1,
       )),
       tokio::spawn(crate::cmc_server::run_server(self_info.clone(), shdn_recv2)),
-      tokio::spawn(crate::info_mcast_server::run_server(self_info.clone(), mcast_rx, shared_media_clock.clone(), channels_sub_rx, shdn_recv3)),
+      tokio::spawn(crate::info_mcast_server::run_server(self_info.clone(), mcast_rx, shared_media_clock.clone(), channels_sub_rx, tx_peaks.clone(), shdn_recv3)),
     ]);
 
     info!("all common tasks spawned");
@@ -110,6 +118,8 @@ impl DeviceServer {
       mcast_tx,
       channels_sub_tx,
       tx_flows_info,
+      tx_peaks,
+      rx_peaks,
       //tasks,
       //tx_inputs,
       shutdown_todo,
@@ -190,13 +200,37 @@ impl DeviceServer {
   async fn transmit<P: ProxyToSamplesBuffer + Send + Sync + 'static>(&mut self, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, rb_outputs: Vec<RBOutput<Sample, P>>, current_timestamp: Arc<AtomicUsize>, on_transfer: Option<Box<dyn Fn() + Send>>) {
     let clock_rx = self.clock_receiver.subscribe();
     
-    let (flows_tx_handle, flows_tx_thread) = FlowsTransmitter::start(self.self_info.clone(), clock_rx, rb_outputs, start_time_rx, current_timestamp.clone(), on_transfer);
+    let (flows_tx_handle, flows_tx_thread) = FlowsTransmitter::start(self.self_info.clone(), clock_rx, rb_outputs.clone(), start_time_rx, current_timestamp.clone(), on_transfer);
     let (shutdown_send, shutdown_recv) = broadcast_queue::channel(16);
     let flows_control_task = tokio::spawn(crate::flows_control_server::run_server(self.self_info.clone(), flows_tx_handle, self.tx_flows_info.clone(), shutdown_recv));
+    let peaks_work = Arc::new(AtomicBool::new(true));
+    let peaks_work1 = peaks_work.clone();
+    let peaks = self.tx_peaks.clone();
+    let media_clock = self.shared_media_clock.clone();
+    let sample_rate = self.self_info.sample_rate;
+    // TODO
+    /* let peaks_thread = std::thread::Builder::new().name("peaks of TX".to_owned()).spawn(move || {
+      let mut buf = vec![0 as Sample; PEAKS_BUFFER_LEN];
+      while peaks_work.load(Ordering::Relaxed) {
+        sleep(PEAKS_ITER_SLEEP);
+        let read_from = 0; // TODO doesn't work because unconditional_read()==true in ALSA plugin
+        for (chi, rbout) in rb_outputs.iter().enumerate() {
+          let readable_until = rbout.readable_until();
+          let to_read = readable_until.wrapping_sub(read_from).min(PEAKS_BUFFER_LEN);
+          let start_timestamp = readable_until.wrapping_sub(to_read);
+          rbout.read_at(start_timestamp, &mut buf);
+          let samples = &buf[0..to_read];
+          let peak = samples.iter().map(|n|n.saturating_abs()).max().unwrap_or(0);
+          peaks[chi].fetch_max(peak, Ordering::Relaxed);
+        }
+      }
+    }).unwrap(); */
     self.tx_shutdown_todo = Some(async move {
+      peaks_work1.store(false, Ordering::Relaxed);
       shutdown_send.send(()).unwrap();
       flows_control_task.await.unwrap();
       flows_tx_thread.join().unwrap();
+      //peaks_thread.join().unwrap();
     }.boxed());
   }
   pub async fn stop_transmitter(&mut self) {
