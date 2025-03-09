@@ -32,8 +32,8 @@ use std::time::Instant;
 use tokio::sync::{broadcast as broadcast_queue, mpsc, watch};
 
 use crate::device_info::{Channel, DeviceInfo};
-
 use crate::{common::*, MediaClock, RealTimeClockReceiver};
+use crate::flows_control_server::FlowInfo as TXFlowInfo;
 
 
 pub struct DeviceServer {
@@ -45,6 +45,7 @@ pub struct DeviceServer {
   mdns_client: Arc<MdnsClient>,
   mcast_tx: mpsc::Sender<MulticastMessage>,
   channels_sub_tx: watch::Sender<Option<Arc<ChannelsSubscriber>>>,
+  tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>>,
   //tx_inputs: Vec<RBInput<Sample, P>>,
   //tasks: Vec<JoinHandle<()>>,
   shutdown_todo: Pin<Box<dyn Future<Output = ()> + Send>>,
@@ -76,11 +77,13 @@ impl DeviceServer {
     let mut tasks = vec![];
 
     let (channels_sub_tx, channels_sub_rx) = watch::channel(None);
+    let tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>> = Default::default();
 
     tasks.append(&mut vec![
       tokio::spawn(crate::arc_server::run_server(
         self_info.clone(),
         channels_sub_rx.clone(),
+        tx_flows_info.clone(),
         shdn_recv1,
       )),
       tokio::spawn(crate::cmc_server::run_server(self_info.clone(), shdn_recv2)),
@@ -106,6 +109,7 @@ impl DeviceServer {
       mdns_client,
       mcast_tx,
       channels_sub_tx,
+      tx_flows_info,
       //tasks,
       //tx_inputs,
       shutdown_todo,
@@ -188,7 +192,7 @@ impl DeviceServer {
     
     let (flows_tx_handle, flows_tx_thread) = FlowsTransmitter::start(self.self_info.clone(), clock_rx, rb_outputs, start_time_rx, current_timestamp.clone(), on_transfer);
     let (shutdown_send, shutdown_recv) = broadcast_queue::channel(16);
-    let flows_control_task = tokio::spawn(crate::flows_control_server::run_server(self.self_info.clone(), flows_tx_handle, shutdown_recv));
+    let flows_control_task = tokio::spawn(crate::flows_control_server::run_server(self.self_info.clone(), flows_tx_handle, self.tx_flows_info.clone(), shutdown_recv));
     self.tx_shutdown_todo = Some(async move {
       shutdown_send.send(()).unwrap();
       flows_control_task.await.unwrap();

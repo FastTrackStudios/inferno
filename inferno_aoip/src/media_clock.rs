@@ -50,7 +50,7 @@ impl MediaClock {
   pub fn get_overlay(&self) -> &Option<ClockOverlay> {
     &self.overlay
   }
-  pub fn update_overlay(&mut self, overlay: ClockOverlay) {
+  pub fn update_overlay(&mut self, mut overlay: ClockOverlay) {
     /* if let Some(cur_overlay) = self.overlay {
       let cur_ovl_time = cur_overlay.now_ns();
       let new_ovl_time = overlay.now_ns();

@@ -347,7 +347,7 @@ impl FlowsTransmitter {
     self.commands_sender.send(Command::Shutdown).await.log_and_forget();
   }
 
-  pub async fn add_flow(&mut self, dst_addr: SocketAddr, channel_indices: impl IntoIterator<Item=Option<usize>>, fpp: usize, bytes_per_sample: usize) -> Result<FlowHandle, std::io::Error> {
+  pub async fn add_flow(&mut self, dst_addr: SocketAddr, channel_indices: impl IntoIterator<Item=Option<usize>>, fpp: usize, bytes_per_sample: usize) -> Result<(usize, FlowHandle), std::io::Error> {
     let (flow_number, cookie) = match self.ip_port_to_id.get(&dst_addr) {
       None => {
         self.scan_expired().await;
@@ -394,7 +394,7 @@ impl FlowsTransmitter {
     flow_handle[0..4].copy_from_slice(&flow_number.to_be_bytes());
     flow_handle[4..6].copy_from_slice(&cookie.to_be_bytes());
 
-    Ok(flow_handle)
+    Ok((flow_number as usize, flow_handle))
   }
   fn get_flow(&self, handle: FlowHandle) -> Option<(u32, &FlowData)> {
     let (id, cookie) = split_handle(handle);
@@ -406,20 +406,20 @@ impl FlowsTransmitter {
     }
     self.commands_sender.send(Command::RemoveFlow { index: id as usize }).await.unwrap();
   }
-  pub async fn remove_flow(&mut self, handle: FlowHandle) -> bool {
+  pub async fn remove_flow(&mut self, handle: FlowHandle) -> Result<usize, std::io::Error> {
     if let Some((id, _)) = self.get_flow(handle) {
       self.remove_flow_internal(id).await;
-      true
+      Ok(id as usize)
     } else {
-      false
+      Err(std::io::Error::from(std::io::ErrorKind::NotFound))
     }
   }
-  pub async fn set_channels(&mut self, handle: FlowHandle, channel_indices: impl IntoIterator<Item=Option<usize>>) -> bool {
+  pub async fn set_channels(&mut self, handle: FlowHandle, channel_indices: impl IntoIterator<Item=Option<usize>>) -> Result<usize, std::io::Error> {
     if let Some((id, _)) = self.get_flow(handle) {
       self.commands_sender.send(Command::SetChannels { index: id as usize, channel_indices: channel_indices.into_iter().collect_vec() }).await.unwrap();
-      true
+      Ok(id as usize)
     } else {
-      false
+      Err(std::io::Error::from(std::io::ErrorKind::NotFound))
     }
   }
   async fn scan_expired(&mut self) {
@@ -434,5 +434,8 @@ impl FlowsTransmitter {
     for id in expired_ids {
       self.remove_flow_internal(id).await;
     }
+  }
+  pub fn is_empty(&self) -> bool {
+    self.flows.is_empty()
   }
 }

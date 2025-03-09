@@ -7,8 +7,10 @@ use crate::protocol::req_resp;
 use crate::protocol::req_resp::HEADER_LENGTH;
 use crate::flows_rx::MAX_FLOWS as MAX_RX_FLOWS;
 use crate::flows_tx::MAX_FLOWS as MAX_TX_FLOWS;
+use crate::flows_control_server::FlowInfo as TXFlowInfo;
 use bytebuffer::{ByteBuffer, Endian};
 use log::{error, info, trace};
+use std::sync::RwLock;
 use std::{cmp::min, sync::Arc};
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::watch;
@@ -17,6 +19,7 @@ use tokio::sync::watch;
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
   mut channels_sub_rx: watch::Receiver<Option<Arc<ChannelsSubscriber>>>,
+  tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>>,
   shutdown: BroadcastReceiver<()>,
 ) {
   let mut subscriber = None;
@@ -296,67 +299,82 @@ pub async fn run_server(
           let code = if remaining > in_this_response { 0x8112 } else { 1 };
           conn.respond_with_code(code, response.as_bytes()).await;
         }
-        /* 0x2200 => {
-          // query TX flows ???
+        0x2200 => { // query TX flows
           let content = request.content();
           let start_index = make_u16(content[2], content[3]) as usize - 1;
           let mut response = ByteBuffer::new();
-          let in_this_response = 2;
-          response.write_u8(in_this_response as u8);
-          response.write_u8(in_this_response as u8);
-          for _ in 0..in_this_response {
-            response.write_u16(0);
-          }
-          let mut flow_positions = vec![];
-          {
-            let flow_index = 0;
-            let flow_id = flow_index+1;
-            let local_tx_flow_name_offset = response.get_wpos() + HEADER_LENGTH;
-            let flow_name = format!("{}_{}", flow_id, self_info.process_id);
-            response.write_bytes(flow_name.as_bytes());
-            response.write_u8(0);
-            
+          let code = {
+            let flows_info = tx_flows_info.read().unwrap();
+            let remaining = flows_info.iter().skip(start_index).filter(|opt|opt.is_some()).count();
+            let limit = 12;
+            let in_this_response = min(limit, remaining);
 
-            while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
+            response.write_u8(in_this_response as u8);
+            response.write_u8(in_this_response as u8);
+            for _ in 0..in_this_response {
+              response.write_u16(0);
+            }
+            let mut flow_positions = vec![];
+
+            for (flow_index, flow_info_opt) in flows_info.iter().enumerate().skip(start_index).take(in_this_response) {
+              // 58 bytes per descriptor (with 2 channels and 2-word mask)
+              // 46 + channels_per_flow * (bytes_per_mask + 2)
+              if flow_info_opt.is_none() { continue; }
+              let flow_info = flow_info_opt.as_ref().unwrap();
+              
+              let flow_id = flow_index+1;
+              let local_tx_flow_name_offset = response.get_wpos() + HEADER_LENGTH;
+              let flow_name = format!("{}_{}", flow_id, self_info.process_id);
+              response.write_bytes(flow_name.as_bytes());
               response.write_u8(0);
+
+              let remote_hostname_offset = response.get_wpos() + HEADER_LENGTH;
+              response.write_bytes(flow_info.rx_hostname.as_bytes());
+              response.write_u8(0);
+
+              let remote_rx_flow_name_offset = response.get_wpos() + HEADER_LENGTH;
+              response.write_bytes(flow_info.rx_flow_name.as_bytes());
+              response.write_u8(0);
+            
+              while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
+                response.write_u8(0);
+              }
+              let descriptor1_pos = response.get_wpos() + HEADER_LENGTH;
+              response.write_u16(0x0802);
+              response.write_u16(flow_info.rx_port);
+              response.write_bytes(&flow_info.rx_addr.octets());
+
+              let descriptor2_pos = response.get_wpos();
+              response.write_bytes(&[0x0a, 0x00, 0x00, 0x01]);
+              response.write_u16(remote_hostname_offset as u16);
+              response.write_u16(remote_rx_flow_name_offset as u16);
+              response.write_u16(0x10); // ??? 0x3c (60), or 0x10...
+              response.write_u16(local_tx_flow_name_offset as u16);
+              response.write_bytes(&[0u8; 8]);
+
+              flow_positions.push(response.get_wpos() + HEADER_LENGTH);
+              response.write_u16(flow_id.try_into().unwrap());
+              response.write_u16(0x11); // or 2 for multicast
+              response.write_u32(self_info.sample_rate);
+              response.write_u16(0);
+              response.write_u16(0x18);
+              response.write_u16(1);
+              response.write_u16(flow_info.local_channel_indices.len().try_into().unwrap());
+              response.write_u16(descriptor1_pos as u16);
+              for ch in &flow_info.local_channel_indices {
+                response.write_u16(ch.map(|i|i+1).unwrap_or(0).try_into().unwrap());
+              }
+              response.write_u16(descriptor2_pos as u16);
             }
-            let descriptor1_pos = response.get_wpos() + HEADER_LENGTH;
-            response.write_u16(0x0802);
-            response.write_u16(flow_info.rx_port);
-            response.write_bytes(&flow_info.rx_addr);
 
-            let descriptor2_pos = response.get_wpos();
-            response.write_bytes(&[0x0a, 0x00, 0x00, 0x01]);
-            response.write_u16(remote_hostname_offset);
-            response.write_u16(remote_rx_flow_name_offset);
-            response.write_u16(0x10); // ??? 0x3c (60), or 0x10...
-            response.write_u16(local_tx_flow_name_offset as u16);
-            response.write_bytes(&[0u8; 8]);
-
-            flow_positions.push(response.get_wpos() + HEADER_LENGTH);
-            response.write_u16(flow_id);
-            response.write_u16(0x11); // or 2 for multicast
-            response.write_u32(self_info.sample_rate);
-            response.write_u16(0);
-            response.write_u16(0x18);
-            response.write_u16(1);
-            response.write_u16(channel_indices.len());
-            response.write_u16(descriptor1_pos);
-            for ch in channel_indices {
-              response.write_u16(ch.map(|i|i+1).unwrap_or(0));
+            response.set_wpos(2);
+            for pos in flow_positions {
+              response.write_u16(pos as _);
             }
-            response.write_u16(descriptor2_pos);
-          }
-
-          0x00, 0x94, 0x08, 0x02, 0x38, 0x03,
-0x0a, 0x00, 0x05, 0x34, 0x0a, 0x00, 0x00, 0x01, 0x00, 0xaa, 0x00, 0xb0, 0x00, 0x3c, 0x00, 0xa8,
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-          
-          response.set_wpos(2);
-          for pos in flow_positions {
-            response.write_u16(pos as _);
-          }
-        } */
+            if remaining > in_this_response { 0x8112 } else { 1 }
+          };
+          conn.respond_with_code(code, response.as_bytes()).await;
+        }
         0x2320 => { // ???
           conn.respond_with_code(0x30, &[]).await;
         }
