@@ -47,6 +47,7 @@ fn create_self_info(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr
   let mut netmask = Ipv4Addr::new(0,0,0,0);
   let mut gateway = Ipv4Addr::new(0,0,0,0);
   let mut mac_address = MacAddr::zero();
+  let mut speed = 0;
   for iface in netdev::get_interfaces() {
     let mut our_iface = false;
     for network in iface.ipv4 {
@@ -57,6 +58,7 @@ fn create_self_info(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr
       }
     }
     if our_iface {
+      speed = [iface.transmit_speed.unwrap_or(0), iface.receive_speed.unwrap_or(0)].iter().max().unwrap_or(&0) / 1_000_000;
       if let Some(gws) = iface.gateway {
         for gw in gws.ipv4 {
           if (gw.to_bits() & netmask.to_bits()) == (my_ipv4.to_bits() & netmask.to_bits()) {
@@ -77,6 +79,7 @@ fn create_self_info(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr
     netmask,
     gateway,
     mac_address,
+    link_speed: speed.clamp(0, 10000).try_into().unwrap(),
     board_name: "Inferno-AoIP".to_owned(),
     manufacturer: "Inferno-AoIP".to_owned(),
     model_name: app_name.to_owned(),

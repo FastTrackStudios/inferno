@@ -148,19 +148,23 @@ impl<'s> Multicaster<'s> {
       .await;
   }
 
-  async fn send_heartbeat(&mut self) {
-    let ctr = self.seqnum;
-    let mut bytes = ByteBuffer::new();
-    bytes.set_endian(bytebuffer::Endian::BigEndian);
- 
-    let freq_offset_opt = self.clock.read().unwrap().get_overlay().as_ref().map(|clkovl| {
+  fn get_freq_offset_ppb(&self) -> Option<i32> {
+    self.clock.read().unwrap().get_overlay().as_ref().map(|clkovl| {
       let freq_offset_f = (clkovl.freq_scale_including_hw() * 1_000_000_000f64).round();
       if i32::MIN as f64 <= freq_offset_f && freq_offset_f <= i32::MAX as f64 {
         Some(freq_offset_f as i32)
       } else {
         None
       }
-    }).flatten();
+    }).flatten()
+  }
+
+  async fn send_heartbeat(&mut self) {
+    let ctr = self.seqnum;
+    let mut bytes = ByteBuffer::new();
+    bytes.set_endian(bytebuffer::Endian::BigEndian);
+ 
+    let freq_offset_opt = self.get_freq_offset_ppb();
 
     if let Some(freq_offset) = freq_offset_opt {
       bytes.write_u16(16); // length of this part
@@ -170,7 +174,7 @@ impl<'s> Multicaster<'s> {
       bytes.write_u16(ctr);
       bytes.write_u16(0);
       bytes.write_i32(freq_offset);
-      debug!("freq offset {freq_offset}/1000 ppm");
+      trace!("freq offset {freq_offset}/1000 ppm");
 
       /* bytes.write_bytes(&[
         0x00, 0x24, 0x80, 0x00,
@@ -214,58 +218,6 @@ impl<'s> Multicaster<'s> {
         0x00, 0x04, 0x00, 0x10,  H(ctr), L(ctr), 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
       ]); */
-
-      // TODO: this is response to 0738002100000064
-      let required_prefix = format!("clock-stats.{}0000", hex::encode(self.self_info.mac_address.octets()));
-      let mut master_clock = None;
-      if let Ok(readdir) = std::fs::read_dir("/tmp") {
-        for entry in readdir {
-          if let Ok(entry) = entry {
-            if entry.file_name().to_string_lossy().starts_with(&required_prefix) {
-              if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                let content = content.trim_ascii();
-                if content.len() >= 12 {
-                  if let Ok(master_id) = hex::decode(&content[0..16]) {
-                    master_clock = Some(master_id);
-                    break;
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-      if let Some(mc) = master_clock {
-        assert_eq!(mc.len(), 8);
-        let mut clkstatus = ByteBuffer::new();
-        clkstatus.set_endian(bytebuffer::Endian::BigEndian);
-        clkstatus.write_bytes(&[
-          0x00, 0x03, 0x00, 0x03 /* 0x01 = PLL not locked */, 0x00, 0x00, 0x00, 0x9f /* was 0xff */,
-        ]);
-        clkstatus.write_i32(freq_offset);
-        clkstatus.write_bytes(&self.self_info.mac_address.octets());
-        clkstatus.write_u16(0);
-        clkstatus.write_bytes(&mc);
-        clkstatus.write_bytes(&mc);
-        clkstatus.write_bytes(&[0u8; 76]);
-        /* clkstatus.write_bytes(&[
-          0x00, 0x01, 0x00, 0x34, 0x00, 0x09, 0x00, 0x00, 0x02, 0x94, 0x00, 0x00,
-          0x00, 0x03, 0x0d, 0x40, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x60, 0x0c, 0x00,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x68, 0x10, 0x00,
-          0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x09, 0x00, 0x07,
-          0x00, 0x01, 0x00, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x03, 0x00, 0x03
-        ]); */
-        /* clkstatus.write_bytes(&[
-          0x00, 1 /* was 1 */, 0x00, 0x34 /* was 0x34 */, 0x00, 9 /* was 9 */, 0x00, 0x00, 2 /* was 2 */, 0x34 /* was 0x34 */, 0x00, 0x00,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 6 /* was 6 */, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x60 /* was 0x60 */, 0x0c /* was 0xc */, 0x00,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 1 /* was 1 */, 0x00, 0x00, 0x00, 0x68 /* was 0x68 */, 0x10 /* was 0x10 */, 0x00,
-          0x00, 0x00, 0x00, 1 /* was 1 */, 1 /* was 1 */, 2 /* was 2 */, 1 /* was 1 */, 0x00, 0x00, 0x00, 0x00, 0x11 /* was 0x11 */, 0x00, 0x9 /* was 0x9 */, 0x00, 0x7 /* was 0x7 */      
-        ]); */
-
-        self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00], clkstatus.as_bytes()).await;
-      }
     } else {
       debug!("no clock available");
     }
@@ -289,12 +241,6 @@ impl<'s> Multicaster<'s> {
       0x00, 0x00, /* 44100: */ 0xac, 0x44, 0x00, 0x00, 0xbb, 0x80, 0x00, 0x01, 0x58, 0x88, 0x00, 0x01, 0x77, 0x00]
     ).await; */
 
-    // this is probably response to 0738007700000064
-    self.send(
-      self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x78, 0, 0, 0, 0],
-      &[0, 0, 0, 3, 0, 0, 0, 0]
-    ).await;
-
     self.send(
       self.device_info_destination, 0xffff, [0x07, 0x2a, 0x10, 0x07, 0, 0, 0, 0],
       &[0, 0, 0, 0]
@@ -308,12 +254,6 @@ impl<'s> Multicaster<'s> {
       0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20
     ]).await; */
 
-    /* self.send(
-      self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x82, 0x00, 0x00, 0x00, 0x00],
-      &[
-        0x00, 0x18, 0x00, 0x03, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x18, 0x00, 0x02, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20
-    ]).await; */
 
     /* self.send(
       self.device_info_destination, 0xffff, [0x07, 0x2a, 0x10, 0x09, 0x00, 0x00, 0x00, 0x00],
@@ -323,31 +263,58 @@ impl<'s> Multicaster<'s> {
         /* transmitting to us??? : */ 0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x11, 0x66, 0x33,
       ]).await; */
 
-    // necessary, this is response to 0738002100000064
-    // TODO: Clock Domain Mismatch if we send this!
-    /* self.send(
-      self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00],
-      &[
-        0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x9f, /* clock offset: */ 0xff, 0xff, 0x32, 0x0e,
-        /* own MAC address: */ 0x00, 0x1d, 0xc1, 0xAA,
-        0xBB, 0xCC, 0x00, 0x00,
-        /* master MAC address: */ 0x00, 0x1d, 0xc1, 0x11, 0x11, 0x33, 0x00, 0x00,
-        /* master MAC address: */ 0x00, 0x1d, 0xc1, 0x11,
-        0x11, 0x33, 0x00, 0x00, 0x00, 0x01, 0x00, 0x34, 0x00, 0x09, 0x00, 0x00, 0x02, 0x94, 0x00, 0x00,
-        0x00, 0x03, 0x0d, 0x40, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x60, 0x0c, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x68, 0x10, 0x00,
-        0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x09, 0x00, 0x07,
-        0x00, 0x01, 0x00, 0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x03, 0x00, 0x03
-      ]
-    ).await; */
- 
+  }
 
+  async fn send_clock_stats(&mut self) {
+    let freq_offset = if let Some(f) = self.get_freq_offset_ppb() {
+      f
+    } else {
+      return;
+    };
+    let required_prefix = format!("clock-stats.{}0000", hex::encode(self.self_info.mac_address.octets()));
+    let mut master_clock = None;
+    if let Ok(readdir) = std::fs::read_dir("/tmp") {
+      for entry in readdir {
+        if let Ok(entry) = entry {
+          if entry.file_name().to_string_lossy().starts_with(&required_prefix) {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+              let content = content.trim_ascii();
+              if content.len() >= 12 {
+                if let Ok(master_id) = hex::decode(&content[0..16]) {
+                  master_clock = Some(master_id);
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    if let Some(mc) = master_clock {
+      assert_eq!(mc.len(), 8);
+      let mut bytes = ByteBuffer::new();
+      bytes.set_endian(bytebuffer::Endian::BigEndian);
+      bytes.write_bytes(&[
+        0x00, 0x03, 0x00, 0x03 /* 0x01 = PLL not locked */, 0x00, 0x00, 0x00, 0x9f /* was 0xff */,
+      ]);
+      bytes.write_i32(freq_offset);
+      bytes.write_bytes(&self.self_info.mac_address.octets());
+      bytes.write_u16(0);
+      bytes.write_bytes(&mc);
+      bytes.write_bytes(&mc);
+      bytes.write_bytes(&[0u8; 76]);
+      self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00], bytes.as_bytes()).await;
+    }
+  }
+
+  async fn send_network_info(&mut self) {
     let mut bytes = ByteBuffer::new();
     bytes.set_endian(bytebuffer::Endian::BigEndian);
     bytes.write_bytes(&[
-      0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x01
+      0x00, 0x01, 0x00, 0x00, 0x00, 0x00
     ]);
+    bytes.write_u16(self.self_info.link_speed);
+    bytes.write_u16(1);
     bytes.write_bytes(&self.self_info.mac_address.octets());
     bytes.write_bytes(&self.self_info.ip_address.octets());
     bytes.write_bytes(&self.self_info.netmask.octets());
@@ -357,14 +324,14 @@ impl<'s> Multicaster<'s> {
       0x00, 0x18, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     ]);
-    // TODO
-    // necessary, this is response to 0738001300000064:
+    
     self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00],
       bytes.as_bytes()
     ).await;
-
   }
+
 }
+
 
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
@@ -398,6 +365,18 @@ pub async fn run_server(
           [0x07, _, 0, 0xc1, 0, 0, 0, 0] => {
             mcaster.send_product_info().await;
           },
+          [0x07, _ /* was 0x38 */, 0, 0x21, 0, 0, 0, _ /* was 0x64 */] => {
+            mcaster.send_clock_stats().await;
+          },
+          [0x07, _, 0, 0x13, 0, 0, 0, _] => {
+            mcaster.send_network_info().await;
+          }
+          [0x07, _, 0, 0x77, 0, 0, 0, _]=> {
+            mcaster.send(
+              mcaster.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x78, 0, 0, 0, 0],
+              &[0, 0, 0, 3, 0, 0, 0, 0]
+            ).await;
+          }
           _ => {
             warn!("unknown request to multicast port: opcode: {}", hex::encode(opcode));
             warn!("raw udp payload: {}", hex::encode(request_buf));

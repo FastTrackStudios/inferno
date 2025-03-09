@@ -16,6 +16,7 @@ pub struct DeviceInfo {
   pub netmask: Ipv4Addr,
   pub gateway: Ipv4Addr,
   pub mac_address: MacAddr,
+  pub link_speed: u16,
 
   pub board_name: String,
   pub manufacturer: String,
