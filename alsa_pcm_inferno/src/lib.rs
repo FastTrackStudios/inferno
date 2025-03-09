@@ -132,6 +132,7 @@ struct MyIOPlug {
     settings: Settings,
     //config: BTreeMap<String, String>,
     ref_time: Instant,
+    use_flows_clock: bool,
     stream_info: Option<StreamInfo>,
     buffers_valid: Arc<RwLock<bool>>,
     media_clock: MediaClock,
@@ -191,10 +192,30 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         }
         //now_samples_opt.map(|now_samples| now_samples.wrapping_sub(this.start_time.unwrap())).unwrap_or(0) as i64
     };
+
+    let boundary: snd_pcm_sframes_t = this.stream_info.as_ref().unwrap().boundary.try_into().unwrap();
+    let max_diff = boundary/4;
+    let appl_ptr = ((*io).appl_ptr as snd_pcm_sframes_t).wrapping_add(this.stream_info.as_ref().unwrap().boundary_add.0);
+    let mut diff = ptr.wrapping_sub(appl_ptr);
+    // handle situation when our "hardware" pointer wraps around boundary but the application pointer not yet (or vice versa):
+    if diff.saturating_abs() > max_diff {
+        let d = diff.wrapping_add(boundary);
+        if d.saturating_abs() <= max_diff {
+            diff = d;
+        } else {
+            let d = diff.wrapping_sub(boundary);
+            if d.saturating_abs() <= max_diff {
+                diff = d;
+            } else {
+                error!("very large hw-appl ptr diff: {diff} = {ptr} - {appl_ptr}, boundary_add {} ({boundary}). reporting xrun because something is clearly wrong", this.stream_info.as_ref().unwrap().boundary_add.0);
+                return (-EPIPE).try_into().unwrap(); // report xrun
+            }
+        }
+    }
     
     let (dir, buffered) = match (*io).stream {
-        SND_PCM_STREAM_CAPTURE => ("capture", ptr.wrapping_sub((*io).appl_ptr as snd_pcm_sframes_t)),
-        SND_PCM_STREAM_PLAYBACK => ("playback", ((*io).appl_ptr as snd_pcm_sframes_t).wrapping_sub(ptr)),
+        SND_PCM_STREAM_CAPTURE => ("capture", diff),
+        SND_PCM_STREAM_PLAYBACK => ("playback", (0 as snd_pcm_sframes_t).wrapping_sub(diff)),
         _ => ("???", 0)
     };
 
@@ -208,13 +229,12 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
             return (-EPIPE).try_into().unwrap(); // report xrun
         }
         
-        return (-libc::EPIPE).try_into().unwrap(); // report xrun
+        return (-EPIPE).try_into().unwrap(); // report xrun
         // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
         // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
     }
     
-    let boundary: snd_pcm_sframes_t = this.stream_info.as_ref().unwrap().boundary.try_into().unwrap();
-    ptr = ptr.wrapping_add(this.stream_info.as_mut().unwrap().boundary_add.0);
+    ptr = ptr.wrapping_add(this.stream_info.as_ref().unwrap().boundary_add.0);
     if ptr > boundary {
         this.stream_info.as_mut().unwrap().boundary_add -= boundary;
         ptr -= boundary;
@@ -300,7 +320,7 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
             channels: channels_buffers,
             start_time_rx,
             clock_rx_tx,
-            current_timestamp: this.current_timestamp.clone(),
+            current_timestamp: if this.use_flows_clock { this.current_timestamp.clone() } else { Default::default() },
             on_transfer: Box::new(this.on_transfer.as_ref().clone()),
         };
         let mut err = false;
@@ -482,11 +502,23 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
     let app_name = get_app_name().unwrap_or(format!("process {}", std::process::id().to_string()));
     let settings = Settings::new(&app_name, &app_name, None, &config);
 
+    let disable_pollfd = config.get("DISABLE_POLLFD").map(|v|v=="1").unwrap_or(false);
+    let on_transfer: Box<dyn Fn() + Send + Sync + 'static> = if disable_pollfd {
+        Box::new(move || {})
+    } else {
+        Box::new(move || {
+            libc::write(efd, [1u64].as_ptr() as *const c_void, 8);
+        })
+    };
+
+    let use_flows_clock = config.get("USE_FLOWS_CLOCK").map(|v|v=="1").unwrap_or(false);
+
     let myio = Box::into_raw(Box::new(MyIOPlug {
         io: zeroed(),
         callbacks,
         settings,
         ref_time: Instant::now(),
+        use_flows_clock,
         stream_info: None,
         buffers_valid: Arc::new(RwLock::new(false)),
         media_clock: MediaClock::new(),
@@ -495,9 +527,7 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         start_time_tx: None,
         current_timestamp: Arc::new(AtomicUsize::new(usize::MAX)),
         on_transfer_eventfd: efd,
-        on_transfer: Box::new(move || {
-            libc::write(efd, [1u64].as_ptr() as *const c_void, 8);
-        }),
+        on_transfer,
         last_transfer_buffer_offset: 0,
         transfer_offset_add: Wrapping(0),
     }));
@@ -511,8 +541,10 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 
     // despite ALSA PCM plugin documentation saying that poll_fd is optional,
     // SoX actually requires it, misbehaving if not notified about transfers
-    io.poll_events = POLLIN as u32;
-    io.poll_fd = efd;
+    if !disable_pollfd {
+        io.poll_events = POLLIN as u32;
+        io.poll_fd = efd;
+    }
 
     io.private_data = myio as *mut _;
 
@@ -554,8 +586,8 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         return r;
     }
 
-    let min_samples = 128;
-    let min_samples_whole_buffer = 1024; // must be power of 2 and >= max receive latency
+    let min_samples = 16;
+    let min_samples_whole_buffer = 1024; // must be power of 2 and > (max receive latency + ALSA period)
     let max_samples = 16384;
     let bytes_per_sample = size_of::<Sample>() as u32;
 
@@ -580,7 +612,7 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         return r;
     }
 
-    let r = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIODS as i32, 2, 8);
+    let r = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIODS as i32, 2, 64);
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIODS returned {r}");
         return r;

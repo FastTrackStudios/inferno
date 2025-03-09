@@ -297,10 +297,65 @@ pub async fn run_server(
           conn.respond_with_code(code, response.as_bytes()).await;
         }
         /* 0x2200 => {
-          // Destinations of this device's Transmitters (or not???)
+          // query TX flows ???
           let content = request.content();
           let start_index = make_u16(content[2], content[3]) as usize - 1;
+          let mut response = ByteBuffer::new();
+          let in_this_response = 2;
+          response.write_u8(in_this_response as u8);
+          response.write_u8(in_this_response as u8);
+          for _ in 0..in_this_response {
+            response.write_u16(0);
+          }
+          let mut flow_positions = vec![];
+          {
+            let flow_index = 0;
+            let flow_id = flow_index+1;
+            let local_tx_flow_name_offset = response.get_wpos() + HEADER_LENGTH;
+            let flow_name = format!("{}_{}", flow_id, self_info.process_id);
+            response.write_bytes(flow_name.as_bytes());
+            response.write_u8(0);
+            
+
+            while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
+              response.write_u8(0);
+            }
+            let descriptor1_pos = response.get_wpos() + HEADER_LENGTH;
+            response.write_u16(0x0802);
+            response.write_u16(flow_info.rx_port);
+            response.write_bytes(&flow_info.rx_addr);
+
+            let descriptor2_pos = response.get_wpos();
+            response.write_bytes(&[0x0a, 0x00, 0x00, 0x01]);
+            response.write_u16(remote_hostname_offset);
+            response.write_u16(remote_rx_flow_name_offset);
+            response.write_u16(0x10); // ??? 0x3c (60), or 0x10...
+            response.write_u16(local_tx_flow_name_offset as u16);
+            response.write_bytes(&[0u8; 8]);
+
+            flow_positions.push(response.get_wpos() + HEADER_LENGTH);
+            response.write_u16(flow_id);
+            response.write_u16(0x11); // or 2 for multicast
+            response.write_u32(self_info.sample_rate);
+            response.write_u16(0);
+            response.write_u16(0x18);
+            response.write_u16(1);
+            response.write_u16(channel_indices.len());
+            response.write_u16(descriptor1_pos);
+            for ch in channel_indices {
+              response.write_u16(ch.map(|i|i+1).unwrap_or(0));
+            }
+            response.write_u16(descriptor2_pos);
+          }
+
+          0x00, 0x94, 0x08, 0x02, 0x38, 0x03,
+0x0a, 0x00, 0x05, 0x34, 0x0a, 0x00, 0x00, 0x01, 0x00, 0xaa, 0x00, 0xb0, 0x00, 0x3c, 0x00, 0xa8,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
           
+          response.set_wpos(2);
+          for pos in flow_positions {
+            response.write_u16(pos as _);
+          }
         } */
         0x2320 => { // ???
           conn.respond_with_code(0x30, &[]).await;
@@ -313,7 +368,6 @@ pub async fn run_server(
           let mut response = ByteBuffer::new();
           response.set_endian(Endian::BigEndian);
           let code = if let Some(chsub) = subscriber.as_ref() {
-
             let flows_info = chsub.flows_info();
             let flows_info = flows_info.read().unwrap();
             let content = request.content();

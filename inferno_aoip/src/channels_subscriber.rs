@@ -828,7 +828,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
           };
           let tx_channels = chunk.iter().map(|(_, chadv)| chadv.tx_channel_id);
           let flow_id = flow_index + 1;
-          let flow_name = format!("{}_{}", self.self_info.process_id, flow_id);
+          let flow_name = format!("{}_{}", flow_id, self.self_info.process_id);
           let source = FlowSource::Unicast(UnicastFlow {control_remote_addr: first.addr, dbcp1: first.dbcp1, handle: None});
           let flow = Flow::new(
             flow_id,

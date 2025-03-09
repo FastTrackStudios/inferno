@@ -270,7 +270,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
 }
 
 
-struct FlowInfo {
+struct FlowData {
   cookie: u16,
   remote: SocketAddr,
   expired: Arc<AtomicBool>
@@ -279,7 +279,7 @@ struct FlowInfo {
 pub struct FlowsTransmitter {
   self_info: Arc<DeviceInfo>,
   flow_seq_id: AtomicU32,
-  flows: BTreeMap<u32, FlowInfo>,
+  flows: BTreeMap<u32, FlowData>,
   ip_port_to_id: BTreeMap<SocketAddr, u32>,
   commands_sender: mpsc::Sender<Command>
 }
@@ -334,7 +334,7 @@ impl FlowsTransmitter {
     });
     let srate = self_info.sample_rate;
     // TODO dehardcode latency_ns
-    let thread_join = run_future_in_new_thread("flows TX", move || Self::run(rx, srate, 1_000_000 /*LATENCY TODO*/, channels_outputs, start_time_rx, current_timestamp, on_transfer).boxed_local());
+    let thread_join = run_future_in_new_thread("flows TX", move || Self::run(rx, srate, 0 /*LATENCY TODO*/, channels_outputs, start_time_rx, current_timestamp, on_transfer).boxed_local());
     return (Self {
       commands_sender: tx,
       self_info: self_info.clone(),
@@ -363,7 +363,7 @@ impl FlowsTransmitter {
             return Err(std::io::Error::from(std::io::ErrorKind::OutOfMemory));
           }
         };
-        let flow = FlowInfo {
+        let flow = FlowData {
           cookie: thread_rng().gen(),
           remote: dst_addr.clone(),
           expired: Arc::new(AtomicBool::new(false))
@@ -396,7 +396,7 @@ impl FlowsTransmitter {
 
     Ok(flow_handle)
   }
-  fn get_flow(&self, handle: FlowHandle) -> Option<(u32, &FlowInfo)> {
+  fn get_flow(&self, handle: FlowHandle) -> Option<(u32, &FlowData)> {
     let (id, cookie) = split_handle(handle);
     self.flows.get(&id).filter(|flow| flow.cookie == cookie).map(|flow| (id, flow))
   }

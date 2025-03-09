@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use itertools::Itertools;
 use crate::common::*;
 
@@ -9,9 +9,19 @@ use crate::{byte_utils::{make_u16, read_0term_str_from_buffer}, device_info::Dev
 use crate::protocol::req_resp::{make_packet, req_resp_packet, HEADER_LENGTH};
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 
+#[derive(Debug)]
+struct FlowInfo {
+  pub rx_hostname: String,
+  pub rx_flow_name: String,
+  pub rx_addr: Ipv4Addr,
+  pub rx_port: u16,
+  pub local_channel_indices: Vec<Option<usize>>,
+}
+
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
   mut flows: FlowsTransmitter,
+  //flows_info: Arc<RwLock<Vec<Option<FlowInfo>>>>,
   shutdown: BroadcastReceiver<()>
 ) {
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.flows_control_port, shutdown).await;
