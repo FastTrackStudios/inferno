@@ -180,6 +180,14 @@ fn for_in_ring(length: usize, start: usize, end: usize, mut cb: impl FnMut(usize
   }
 }
 
+impl<P: ProxyToBuffer<Atomic<Sample>>> RingBufferShared<Sample, P> {
+  pub fn peak_sample(&self) -> Sample {
+    self.buffer.map(|buffer| {
+      buffer.iter().step_by(self.stride).map(|s|s.load(Ordering::Relaxed).saturating_abs()).max().unwrap_or(0)
+    }).unwrap_or(0)
+  }
+}
+
 pub struct RBInput<T, P: ProxyToBuffer<Atomic<T>>> {
   rb: Arc<RingBufferShared<T, P>>,
   item_ready: BoolVec,
@@ -342,6 +350,10 @@ impl<T, P: ProxyToBuffer<Atomic<T>>> Clone for RBOutput<T, P> {
 }
 
 impl<T: NoUninit, P: ProxyToBuffer<Atomic<T>>> RBOutput<T, P> {
+  #[inline(always)]
+  pub fn shared(&self) -> &Arc<RingBufferShared<T, P>> {
+    &self.rb
+  }
   pub fn readable_until(&self) -> usize {
     self.rb.readable_pos.load(Ordering::Acquire)
   }

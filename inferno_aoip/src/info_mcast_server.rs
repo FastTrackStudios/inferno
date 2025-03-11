@@ -33,6 +33,8 @@ pub struct MulticastMessage {
   pub content: Vec<u8>,
 }
 
+pub type PeaksCallback = Box<dyn FnMut() -> (Vec<u8>, Vec<u8>) + Send + Sync>;
+
 struct Multicaster<'s> {
   self_info: &'s DeviceInfo,
   pub server: UdpSocketWrapper,
@@ -45,11 +47,11 @@ struct Multicaster<'s> {
   send_buffer: [u8; SEND_BUFFER_SIZE],
   clock: Arc<RwLock<MediaClock>>,
   channels_subscriber: Option<Arc<ChannelsSubscriber>>,
-  tx_peaks: Arc<Vec<AtomicSample>>,
+  get_peaks: PeaksCallback,
 }
 
 impl<'s> Multicaster<'s> {
-  pub fn new(self_info: &'s DeviceInfo, server: UdpSocketWrapper, clock: Arc<RwLock<MediaClock>>, tx_peaks: Arc<Vec<AtomicSample>>) -> Multicaster {
+  pub fn new(self_info: &'s DeviceInfo, server: UdpSocketWrapper, clock: Arc<RwLock<MediaClock>>, get_peaks: PeaksCallback) -> Multicaster {
     let patch_version = env!("CARGO_PKG_VERSION_PATCH").parse::<u16>().unwrap();
     let mut r = Multicaster {
       self_info,
@@ -74,7 +76,7 @@ impl<'s> Multicaster<'s> {
       send_buffer: [0; SEND_BUFFER_SIZE],
       clock,
       channels_subscriber: None,
-      tx_peaks,
+      get_peaks,
     };
     write_str_to_buffer(&mut r.vendor, 0, 8, &self_info.vendor_string);
     return r;
@@ -186,29 +188,32 @@ impl<'s> Multicaster<'s> {
         /* TX errors, 4B: */ 0x00, 0x00, 0x00, 0x02, /* RX errors, 4B: */ 0x00, 0x00, 0x00, 0x07,
       ]); // network statistics */
   
-      let total_peaks = self.tx_peaks.len();
-      bytes.write_u16((24 + total_peaks).try_into().unwrap());
-      bytes.write_u16(0x8002);
-      bytes.write_u16(4);
-      bytes.write_u16((12 + total_peaks).try_into().unwrap());
-      bytes.write_u16(ctr);
-      bytes.write_u16(0);
-      bytes.write_u16(self.tx_peaks.len().try_into().unwrap());
-      bytes.write_u16(0);
-      bytes.write_u16(0); // TODO RX
-      bytes.write_u16(0);
-      bytes.write_u16(24);
-      bytes.write_u16(0);
-      for peak in &*self.tx_peaks {
-        let peak_lin = (peak.swap(0, Ordering::Relaxed) as f32) / (Sample::MAX as f32);
-        //debug!("linear peak is {peak_lin}");
-        let peak_log = peak_lin.log10() * 40.0;
-        let byte: u8 = (-peak_log).round().clamp(0.0, 255.0) as u8;
-        bytes.write_u8(byte);
+      let (rx_peaks, tx_peaks) = (self.get_peaks)();
+      let total_peaks = rx_peaks.len() + tx_peaks.len();
+      if total_peaks > 0 {
+        let mut total_len = 24 + total_peaks;
+        while (total_len % 4) != 0 { total_len += 1; }
+        let end_pos = bytes.get_wpos() + total_len;
+        bytes.write_u16((24 + total_peaks).try_into().unwrap());
+        bytes.write_u16(0x8002);
+        bytes.write_u16(4);
+        bytes.write_u16((12 + total_peaks).try_into().unwrap());
+        bytes.write_u16(ctr);
+        bytes.write_u16(0);
+        bytes.write_u16(tx_peaks.len().try_into().unwrap());
+        bytes.write_u16(0);
+        bytes.write_u16(rx_peaks.len().try_into().unwrap());
+        bytes.write_u16(0);
+        bytes.write_u16(24);
+        bytes.write_u16(0);
+        for peak in tx_peaks.into_iter().chain(rx_peaks.into_iter()) {
+          bytes.write_u8(peak);
+        }
+        while bytes.get_wpos() < end_pos {
+          bytes.write_u8(0);
+        }
       }
-      while (bytes.get_wpos() % 4) != 0 {
-        bytes.write_u8(0);
-      }
+      
       /* bytes.write_bytes(&[
         /* 24 + total ch */ 0x00, 0x28, 0x80, 0x02, 0x00, 0x04, /* 12 + total ch */ 0x00, 0x1c, H(ctr), L(ctr), 0x00, 0x00,
         /* tx channels, 2B: */ 0x00, 0x08, 0x00, 0x00, /* rx channels, 2B: */ 0x00, 0x08, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00,
@@ -364,11 +369,11 @@ pub async fn run_server(
   mut rx: mpsc::Receiver<MulticastMessage>,
   clock: Arc<RwLock<MediaClock>>,
   mut channels_sub_rx: watch::Receiver<Option<Arc<ChannelsSubscriber>>>,
-  tx_peaks: Arc<Vec<AtomicSample>>,
+  get_peaks: PeaksCallback,
   shutdown: BroadcastReceiver<()>,
 ) {
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.info_request_port, shutdown).await;
-  let mut mcaster = Multicaster::new(self_info.as_ref(), server, clock, tx_peaks);
+  let mut mcaster = Multicaster::new(self_info.as_ref(), server, clock, get_peaks);
   mcaster.send_board_info().await;
   mcaster.send_product_info().await;
   let mut heartbeat_interval = interval(Duration::from_secs(1));

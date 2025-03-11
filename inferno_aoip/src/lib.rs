@@ -71,6 +71,7 @@ mod mdns_server;
 mod media_clock;
 mod net_utils;
 mod os_utils;
+mod peaks;
 mod protocol;
 mod real_time_box_channel;
 mod ring_buffer;

@@ -1,5 +1,6 @@
 use crate::flows_rx::FlowInfo;
 use crate::net_utils::{create_mio_udp_socket, MAX_PAYLOAD_BYTES};
+use crate::protocol::mcast::make_channel_change_notification;
 use crate::samples_collector::SamplesCollector;
 use crate::state_storage::StateStorage;
 use crate::MediaClock;
@@ -201,7 +202,7 @@ impl ChannelsBuffering<OwnedBuffer<Atomic<Sample>>> for OwnedBuffering {
 pub struct ExternalBuffering {
   channels: Vec<ExternalBufferParameters<Sample>>,
   hole_fix_wait: usize,
-  ring_buffers: Vec<Arc<RingBufferShared<Sample, ExternalBuffer<Atomic<Sample>>>>>,
+  pub(crate) ring_buffers: Vec<Arc<RingBufferShared<Sample, ExternalBuffer<Atomic<Sample>>>>>,
   //on_disconnect: Vec<Option<Box<dyn FnOnce(Arc<RingBufferShared<Sample, ExternalBuffer<Atomic<Sample>>>>) -> ()>>>,
 }
 
@@ -360,22 +361,9 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     };
   }
   async fn notify_channels_change(&self, channel_indices: impl IntoIterator<Item = usize>) {
-    let mut mask: u8 = 0;
-    for ch in channel_indices {
-      if ch >= 8 {
-        warn!("FIXME: unable to multicast change to rx channel index={ch} properly, >= 8");
-        mask |= 1;
-        continue;
-      }
-      mask |= 1 << ch;
-    }
     self
       .mcast
-      .send(MulticastMessage {
-        start_code: 0xffff,
-        opcode: [0x07, 0x2a, 1, 2, 0, 0, 0, 0],
-        content: [0u8, 1, mask].to_vec(),
-      })
+      .send(make_channel_change_notification(channel_indices))
       .await
       .log_and_forget();
   }

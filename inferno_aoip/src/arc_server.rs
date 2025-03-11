@@ -4,6 +4,7 @@ use crate::channels_subscriber::ChannelsSubscriber;
 use crate::device_info::DeviceInfo;
 use crate::info_mcast_server::MulticastMessage;
 use crate::net_utils::UdpSocketWrapper;
+use crate::protocol::mcast::make_channel_change_notification;
 use crate::protocol::req_resp;
 use crate::protocol::req_resp::HEADER_LENGTH;
 use crate::flows_rx::MAX_FLOWS as MAX_RX_FLOWS;
@@ -47,8 +48,8 @@ pub async fn run_server(
           let total_channels_wtf = txnum + rxnum; // ??? not actually total number of channels but in some devices it is
           conn
             .respond(&[
-              0, // was 0x05
-              0, // was 0xf9
+              0, // was 0x05 but then no channel and flows are shown
+              0x10, // was 0xf9, 0x10 = supports TX channel renames
               H(txnum),
               L(txnum),
               H(rxnum),
@@ -335,19 +336,14 @@ pub async fn run_server(
           let content = request.content();
           let channel_id = make_u16(content[2], content[3]);
           let name_offset = make_u16(content[4], content[5]);
-          let mut mask = 1; // TODO properly
+          let mut channel_indices = vec![];
           let code = match read_0term_str_from_buffer(content, name_offset as usize - HEADER_LENGTH) {
             Ok(new_name) => {
               let index = (channel_id-1) as usize;
               if index < self_info.rx_channels.len() {
                 info!("renaming RX channel id {channel_id} to {new_name}");
+                channel_indices.push(index);
                 *self_info.rx_channels[index].friendly_name.write().unwrap() = new_name.to_owned();
-                if index >= 8 {
-                  warn!("FIXME: unable to multicast change to rx channel index={index} properly, >= 8");
-                  mask |= 1;
-                } else {
-                  mask |= 1 << index;
-                }
                 1
               } else {
                 error!("got rename RX channel request with invalid channel number {channel_id}");
@@ -362,11 +358,7 @@ pub async fn run_server(
           conn.respond_with_code(code, &[]).await;
           if code==1 {
             mcast
-              .send(MulticastMessage {
-                start_code: 0xffff,
-                opcode: [0x07, 0x2a, 1, 2, 0, 0, 0, 0],
-                content: [0u8, 1, mask].to_vec(),
-              })
+              .send(make_channel_change_notification(channel_indices))
               .await.log_and_forget();
             if let Some(chsub) = subscriber.as_ref() {
               info!("saving state after channel rename");
@@ -532,16 +524,6 @@ pub async fn run_server(
             for pos in flow_positions {
               response.write_u16(pos as _);
             }
-
-            /* bytes.write_bytes(&[
-              0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0xbb, 0x80, 0x00, 0x00, 0x00, 0x18, 0x00, 0x01, 0x00, 0x02,
-              0x00, 0x01, 0x00, 0x68, 0x00, 0x62, 0x00, 0x64, 0x00, 0x70, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00,
-              0x08, 0x02, 0x38, 0x05,
-            ]);
-            bytes.write_bytes(&self_info.ip_address.octets());
-            bytes.write_bytes(&[
-              0x00, 0x09, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x42, 0x40, 0x00, 0x00, 0x00, 0x00
-            ]); */
             if remaining > in_this_response { 0x8112 } else { 1 }
           } else {
             response.write_bytes(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
