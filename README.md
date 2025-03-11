@@ -81,9 +81,11 @@ This project makes no claim to be either authorized or approved by Audinate.
 # Tested with
 ## Dante devices
 * Audinate AVIO AES3
+* Audinate AVIO-DAI2
 * Ben & Fellows 523019 4x4 balanced analog I/O module (based on Dante UltimoX4)
-* Klark Teknik DN32-DANTE (based on Dante Brooklyn II)
-* Soundcraft Vi2000
+* Klark Teknik DN32-DANTE (Behringer X32) (based on Dante Brooklyn II)
+* Soundcraft Vi2000 & Vi3000
+* Allen&Heath SQ-5 & SQ-6
 * Dante Via @ OS X
 * Dante Virtual Soundcard @ Windows 10
 
@@ -96,11 +98,14 @@ This project makes no claim to be either authorized or approved by Audinate.
   * Arch
   * Ubuntu
   * Fedora
+* aarch64 (ARM 64-bit) Linux @ Raspberry Pi 5
+  * Raspberry Pi OS
+  * Armbian Bookworm
 
 # Anatomy of the repository
 * `inferno_aoip` - main library crate for emulating a Dante audio over IP device. In the future controller functionality will also be implemented. **Start here if you want to develop your app based on Inferno**.
 * `inferno2pipe` - capture audio, writing interleaved 32-bit integer samples into an Unix named pipe (or a raw file). Helper script for recording to more convenient format is also provided. **Start here if you want to use Inferno for capturing audio without setting up whole audio stack**
-* `alsa_pcm_inferno` - virtual soundcard for ALSA. **Start here if you want functionality similar to DVS**
+* `alsa_pcm_inferno` - virtual soundcard for ALSA. **Start here if you've ever dreamed of Dante Virtual Soundcard for Linux**
 * `searchfire` - fork of [Searchlight](https://github.com/WilliamVenner/searchlight) mDNS crate, modified for compatibility with Dante's mDNS
 
 
@@ -121,6 +126,11 @@ Please use editor respecting `.editorconfig` (for example, VSCode needs an exten
 
 
 # Changelog
+
+## 0.3.1
+* read configuration from ALSA plugin parameters - useful for multiple sources & sinks in PipeWire
+* send statistics (clock, latency, signal levels)
+* changeable usrvclock path
 
 ## 0.3.0
 * introduced ALSA PCM plugin - a virtual soundcard compatible with most Linux audio apps
@@ -149,8 +159,7 @@ likely in order they'll be implementated
 
 At this point, Inferno will roughly become alternative to Dante Virtual Soundcard.
 
-* read configuration from sources other then env vars: ALSA plugin parameters, text files - useful for multiple sources & sinks in PipeWire
-* send statistics (clock, latency, signal levels)
+* read configuration from text files
 * ability to work as a clock source (PTP leader)
 * automated integration test that will launch several instances, stream audio data between them and check for its correctness
 * bit-perfect transmitter (currently 32-bit integers are always used internally and conversion to 24-bit or 16-bit adds dither)
