@@ -48,6 +48,7 @@ pub struct DeviceServer {
   shared_media_clock: Arc<RwLock<MediaClock>>,
   mdns_client: Arc<MdnsClient>,
   mcast_tx: mpsc::Sender<MulticastMessage>,
+  tx_latency_ns: u32,
   channels_sub_tx: watch::Sender<Option<Arc<ChannelsSubscriber>>>,
   tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>>,
   rx_peaks_supplier: Arc<RwLock<Box<dyn Fn() -> Vec<u8> + Send + Sync>>>,
@@ -94,6 +95,7 @@ impl DeviceServer {
     tasks.append(&mut vec![
       tokio::spawn(crate::arc_server::run_server(
         self_info.clone(),
+        state_storage.clone(),
         mcast_tx.clone(),
         channels_sub_rx.clone(),
         tx_flows_info.clone(),
@@ -123,6 +125,7 @@ impl DeviceServer {
       shared_media_clock,
       mdns_client,
       mcast_tx,
+      tx_latency_ns: settings.tx_latency_ns,
       channels_sub_tx,
       tx_flows_info,
       rx_peaks_supplier,
@@ -178,6 +181,7 @@ impl DeviceServer {
       self.mdns_client.clone(),
       self.mcast_tx.clone(),
       channels_buffering,
+      self.tx_latency_ns,
       self.state_storage.clone(),
       srx2,
       self.ref_instant,

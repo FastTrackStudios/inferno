@@ -73,6 +73,9 @@ fn create_self_info(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr
       break;
     }
   }
+
+  let latency_ns = settings.get("RX_LATENCY_NS").
+    map(|s|s.parse().expect("invalid RX_LATENCY_NS, must be integer")).unwrap_or(10_000_000);
   
   let mut result = DeviceInfo {
     ip_address: my_ipv4,
@@ -93,7 +96,7 @@ fn create_self_info(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr
     tx_channels: vec![],
     bits_per_sample: 24, // TODO make it configurable
     pcm_type: 0xe,
-    latency_ns: 10_000_000, // TODO make it configurable
+    latency_ns,
     sample_rate,
 
     arc_port: ARC_PORT,
@@ -115,6 +118,7 @@ fn create_self_info(app_name: &str, short_app_name: &str, my_ip: Option<Ipv4Addr
 #[derive(Clone)] // TODO: this shouldn't need to be clonable, fix the ALSA plugin
 pub struct Settings {
   pub self_info: DeviceInfo,
+  pub tx_latency_ns: u32,
   pub clock_path: Option<PathBuf>,
 }
 
@@ -134,6 +138,7 @@ impl Settings {
 
     let mut result = Self {
       self_info,
+      tx_latency_ns: config.get("TX_LATENCY_NS").map(|p|p.parse().expect("invalid TX_LATENCY_NS, must be integer")).unwrap_or(10_000_000),
       clock_path: config.get("CLOCK_PATH").map(|p|p.try_into().unwrap())
     };
 

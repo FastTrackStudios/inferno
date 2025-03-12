@@ -76,6 +76,7 @@ pub struct ChannelsSubscriber {
 #[derive(Serialize, Deserialize)]
 struct SavedChannelState {
   local_channel_id: u16,
+  /// purely informational, only written, not read!
   local_channel_name: String,
   tx_channel_name: String,
   tx_hostname: String
@@ -94,6 +95,7 @@ impl ChannelsSubscriber {
     mdns_client: Arc<MdnsClient>,
     mcast: mpsc::Sender<MulticastMessage>,
     channels_buffering: B,
+    tx_latency_ns: u32,
     state_storage: Arc<StateStorage>,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
     ref_instant: Instant,
@@ -113,6 +115,7 @@ impl ChannelsSubscriber {
       r.subscriptions_info.clone(),
       mcast,
       channels_buffering,
+      tx_latency_ns,
       state_storage,
       ref_instant,
     );
@@ -318,7 +321,6 @@ struct ChannelsSubscriberInternal<P: ProxyToSamplesBuffer, B: ChannelsBuffering<
   subscriptions_info: Arc<RwLock<Vec<Option<SubscriptionInfo>>>>,
   mcast: mpsc::Sender<MulticastMessage>,
   channels_buffering: B,
-  //samples_collector: Arc<SamplesCollector<P>>,
   state_storage: Arc<StateStorage>,
   ref_instant: Instant,
   needs_resolving: bool,
@@ -335,6 +337,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     subscriptions_info: Arc<RwLock<Vec<Option<SubscriptionInfo>>>>,
     mcast: mpsc::Sender<MulticastMessage>,
     channels_buffering: B,
+    tx_latency_ns: u32,
     state_storage: Arc<StateStorage>,
     ref_instant: Instant,
   ) -> Self {
@@ -347,7 +350,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
       flows: Arc::new(Mutex::new(vec![])),
       flows_recv,
       //buffered_samples_per_channel: 524288,
-      min_latency_ns: 10_000_000, // TODO dehardcode
+      min_latency_ns: tx_latency_ns.try_into().unwrap(),
       ring_buffer_timestamp_shift: 0,
       control_client: Arc::new(FlowsControlClient::new(self_info)),
       mdns_client,
@@ -1191,11 +1194,11 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         }
       }).collect_vec()
     };
-    self.state_storage.save("rx_channels", &state).log_and_forget();
+    self.state_storage.save("rx_subscriptions", &state).log_and_forget();
   }
   async fn load_state(&mut self) {
     let channels = {
-      let result = self.state_storage.load::<SavedChannelsState>("rx_channels").or_else(|_| {
+      let result = self.state_storage.load::<SavedChannelsState>("rx_subscriptions").or_else(|_| {
         self.state_storage.load::<SavedChannelsState>("channels")
         // TODO: remove old state after migration
       });
@@ -1217,7 +1220,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         tx_channel_name: chst.tx_channel_name.clone(),
         status: SubscriptionStatus::Unresolved,
       });
-      *self.self_info.rx_channels[lci].friendly_name.write().unwrap() = chst.local_channel_name;
+      //*self.self_info.rx_channels[lci].friendly_name.write().unwrap() = chst.local_channel_name;
       self.subscribe(lci, &chst.tx_channel_name, &chst.tx_hostname).await;
     }
   }

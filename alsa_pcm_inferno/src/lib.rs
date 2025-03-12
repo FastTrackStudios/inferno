@@ -7,7 +7,7 @@ use inferno_aoip::utils::{run_future_in_new_thread, LogAndForget};
 use inferno_aoip::{AtomicSample, Clock, ClockDiff, DeviceId, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, PositionReportDestination, RealTimeClockReceiver, Sample, Settings};
 use lazy_static::lazy_static;
 use libc::{c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN};
-use log::error;
+use log::{debug, error};
 use tokio::sync::{mpsc, oneshot};
 use core::slice;
 use std::borrow::BorrowMut;
@@ -261,8 +261,11 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
 
     let bits_per_sample = (8 * size_of::<Sample>()) as u32;
     let channels_areas = std::slice::from_raw_parts(channels_areas, (*io).channels as usize);
+    if channels_areas.len()>0 {
+        let area = &channels_areas[0];
+        debug!("got buffer size {} samples * {} channels, first channel: address {:x} with first {}b, step {}b", (*io).buffer_size, channels_areas.len(), area.addr as usize, area.first, area.step);
+    }
     for area in channels_areas {
-        println!("got address {:x} with first {}b, step {}b, size {} samples * {} channels", area.addr as usize, area.first, area.step, (*io).buffer_size, channels_areas.len());
         if (area.first % 8) != 0 || (area.step % 8) != 0 {
             error!("sample size is not measured in whole bytes, unsupported");
             return -libc::EINVAL;

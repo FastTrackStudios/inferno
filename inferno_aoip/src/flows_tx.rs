@@ -29,7 +29,7 @@ pub const FPP_MAX_ADVERTISED: u16 = 32;
 pub const MAX_FLOWS: u32 = 32;
 pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
 pub const KEEPALIVE_TIMEOUT_SECONDS: Clock = 4;
-pub const MAX_LAG_SAMPLES: usize = 4800;
+pub const MAX_LAG_SAMPLES: usize = 2048;
 pub const DISCONTINUITY_THRESHOLD_SAMPLES: usize = 192000;
 const BUFFERED_SAMPLES_PER_CHANNEL: usize = 65536;
 pub const SELECT_THRESHOLD: Duration = Duration::from_millis(100);
@@ -201,7 +201,9 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       let command = if sleep_duration < SELECT_THRESHOLD {
         let cur_ts_opt = min_next_ts.map(|n|n as usize).map(|n|if n==usize::MAX { usize::MAX-1 } else { n });
         self.current_timestamp.store(cur_ts_opt.unwrap_or(usize::MAX), Ordering::SeqCst /*TODO: really needed?*/);
-        std::thread::sleep(sleep_duration);
+        if !sleep_duration.is_zero() {
+          std::thread::sleep(sleep_duration);
+        }
         self.transmit(&mut dither_rng, process_events);
         if process_events {
           self.commands_receiver.try_recv().unwrap_or(Command::NoOp)
