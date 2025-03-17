@@ -1,29 +1,78 @@
-use crate::byte_utils::*;
+use crate::{byte_utils::*, device_info};
 use crate::channels_subscriber::ChannelsSubscriber;
 
 use crate::device_info::DeviceInfo;
 use crate::info_mcast_server::MulticastMessage;
+use crate::mdns_server::{kv, service_type};
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::mcast::make_channel_change_notification;
 use crate::protocol::req_resp;
 use crate::protocol::req_resp::HEADER_LENGTH;
 use crate::flows_rx::MAX_FLOWS as MAX_RX_FLOWS;
-use crate::flows_tx::MAX_FLOWS as MAX_TX_FLOWS;
+use crate::flows_tx::{FPP_MAX_ADVERTISED, FPP_MIN, MAX_CHANNELS_IN_FLOW, MAX_FLOWS as MAX_TX_FLOWS};
 use crate::flows_control_server::FlowInfo as TXFlowInfo;
 use crate::state_storage::{SavedChannelsSettings, StateStorage};
 use crate::utils::LogAndForget;
 use bytebuffer::{ByteBuffer, Endian};
 use log::{error, info, trace, warn};
+use searchfire::broadcast::{BroadcasterHandle, ServiceBuilder};
+use searchfire::dns::rr::Name;
 use tokio::sync::mpsc::Sender;
+use std::net::IpAddr;
 use std::sync::RwLock;
 use std::{cmp::min, sync::Arc};
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::watch;
 
+fn add_tx_channel(self_info: &DeviceInfo, bb: &BroadcasterHandle, index: usize) {
+  let service = |ch_name: &str, default: bool| {
+    let name = Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
+    let mut b = ServiceBuilder::new(service_type("_netaudio-chan"), name, self_info.flows_control_port)
+      .unwrap()
+      .add_ip_address(IpAddr::V4(self_info.ip_address))
+      .add_txt_truncated("txtvers=2")
+      .add_txt_truncated("dbcp1=0x1102")
+      .add_txt_truncated("dbcp=0x1004")
+      .add_txt_truncated(kv("id", index+1))
+      .add_txt_truncated(kv("rate", self_info.sample_rate))
+      .add_txt_truncated(format!("pcm={} {:x}", self_info.bits_per_sample/8, self_info.pcm_type))
+      .add_txt_truncated(kv("enc", self_info.bits_per_sample))
+      .add_txt_truncated(kv("en", self_info.bits_per_sample))
+      .add_txt_truncated(kv("latency_ns", self_info.latency_ns))
+      .add_txt_truncated(format!("fpp={},{}", FPP_MAX_ADVERTISED, FPP_MIN))
+      .add_txt_truncated(kv("nchan", MAX_CHANNELS_IN_FLOW.min(self_info.tx_channels.len() as u16)));
+    if default {
+      b = b.add_txt_truncated("default");
+    }
+    b.build().unwrap()
+  };
+  let txch = &self_info.tx_channels[index];
+  bb.add_service(service(&txch.factory_name, true)).log_and_forget();
+  let friendly_name_locked = txch.friendly_name.read();
+  let friendly_name = friendly_name_locked.unwrap();
+  if txch.factory_name != *friendly_name {
+    bb.add_service(service(&friendly_name, false)).log_and_forget();
+  }
+}
+
+fn remove_tx_channel(self_info: &DeviceInfo, bb: &BroadcasterHandle, index: usize) {
+  let remove = |ch_name: &str| {
+    let name = Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
+    bb.remove_named_service(service_type("_netaudio-chan"), name).log_and_forget();
+  };
+  let txch = &self_info.tx_channels[index];
+  remove(&txch.factory_name);
+  let friendly_name_locked = txch.friendly_name.read();
+  let friendly_name = friendly_name_locked.unwrap();
+  if txch.factory_name != *friendly_name {
+    remove(&friendly_name);
+  }
+}
 
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
   state_storage: Arc<StateStorage>,
+  mdns_server_handle: Arc<BroadcasterHandle>,
   mcast: Sender<MulticastMessage>,
   mut channels_sub_rx: watch::Receiver<Option<Arc<ChannelsSubscriber>>>,
   tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>>,
@@ -31,6 +80,9 @@ pub async fn run_server(
 ) {
   let mut subscriber = None;
   let mut saved_channels = SavedChannelsSettings::load(state_storage, self_info.clone());
+  for (index, txch) in self_info.tx_channels.iter().enumerate() {
+    add_tx_channel(&self_info, &mdns_server_handle, index);
+  }
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.arc_port, shutdown).await;
   let mut conn = req_resp::Connection::new(server);
   while conn.should_work() {
@@ -318,7 +370,9 @@ pub async fn run_server(
               let index = (channel_id-1) as usize;
               if index < self_info.tx_channels.len() {
                 info!("renaming TX channel id {channel_id} to {new_name}");
+                remove_tx_channel(&self_info, &mdns_server_handle, index);
                 saved_channels.rename_tx_channel(index, new_name.to_owned());
+                add_tx_channel(&self_info, &mdns_server_handle, index);
                 response.write_bytes(&[0, 1, 0, 0]);
                 response.write_u16(channel_id);
                 1

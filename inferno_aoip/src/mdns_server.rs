@@ -8,14 +8,16 @@ use std::{net::IpAddr, sync::Arc};
 use crate::{device_info::DeviceInfo, flows_tx::FPP_MAX_ADVERTISED};
 use crate::flows_tx::{FPP_MIN, FPP_MAX, MAX_CHANNELS_IN_FLOW};
 
-fn kv<T: std::fmt::Display>(key: &str, value: T) -> String {
+pub fn kv<T: std::fmt::Display>(key: &str, value: T) -> String {
   format!("{key}={value}")
 }
 
+pub fn service_type(st: &str) -> Name {
+  Name::from_labels([st, "_udp", "local"].iter().map(|&s| s.as_bytes())).unwrap()
+}
+
+
 pub fn start_server(self_info: Arc<DeviceInfo>) -> BroadcasterHandle {
-  let service_type = |st| -> Name {
-    Name::from_labels([st, "_udp", "local"].iter().map(|&s| s.as_bytes())).unwrap()
-  };
   let hostname = Name::from_labels([self_info.friendly_hostname.as_bytes()]).unwrap();
   let mut bb = BroadcasterBuilder::new()
     //.loopback()
@@ -52,39 +54,10 @@ pub fn start_server(self_info: Arc<DeviceInfo>) -> BroadcasterHandle {
         .unwrap(),
     );
   
-  for (index, txch) in self_info.tx_channels.iter().enumerate() {
-    let service = |ch_name: &str, default: bool| {
-      let name = Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
-      let mut b = ServiceBuilder::new(service_type("_netaudio-chan"), name, self_info.flows_control_port)
-        .unwrap()
-        .add_ip_address(IpAddr::V4(self_info.ip_address))
-        .add_txt_truncated("txtvers=2")
-        .add_txt_truncated("dbcp1=0x1102")
-        .add_txt_truncated("dbcp=0x1004")
-        .add_txt_truncated(kv("id", index+1))
-        .add_txt_truncated(kv("rate", self_info.sample_rate))
-        .add_txt_truncated(format!("pcm={} {:x}", self_info.bits_per_sample/8, self_info.pcm_type))
-        .add_txt_truncated(kv("enc", self_info.bits_per_sample))
-        .add_txt_truncated(kv("en", self_info.bits_per_sample))
-        .add_txt_truncated(kv("latency_ns", self_info.latency_ns))
-        .add_txt_truncated(format!("fpp={},{}", FPP_MAX_ADVERTISED, FPP_MIN))
-        .add_txt_truncated(kv("nchan", MAX_CHANNELS_IN_FLOW.min(self_info.tx_channels.len() as u16)));
-      if default {
-        b = b.add_txt_truncated("default");
-      }
-      b.build().unwrap()
-    };
-    bb = bb.add_service(service(&txch.factory_name, true));
-    let friendly_name_locked = txch.friendly_name.read();
-    let friendly_name = friendly_name_locked.unwrap();
-    if txch.factory_name != *friendly_name {
-      bb = bb.add_service(service(&friendly_name, false));
-    }
-  }
-  
   bb.build(IpVersion::V4)
     .unwrap()
     .run_in_background()
     // TODO it doesn't work when there is no default gateway in routing table
     // thread 'main' panicked at 'called `Result::unwrap()` on an `Err` value: MultiIpIoError(V4(Os { code: 101, kind: NetworkUnreachable, message: "Network is unreachable" }))', inferno_aoip/src/mdns_server.rs:55:6
+  
 }

@@ -69,7 +69,7 @@ impl DeviceServer {
     let (shutdown_send, shdn_recv1) = broadcast_queue::channel(16);
     let shdn_recv2 = shutdown_send.subscribe();
     let shdn_recv3 = shutdown_send.subscribe();
-    let mdns_handle = crate::mdns_server::start_server(self_info.clone());
+    let mdns_handle = Arc::new(crate::mdns_server::start_server(self_info.clone()));
 
     let mdns_client = Arc::new(crate::mdns_client::MdnsClient::new(self_info.ip_address));
     let (mcast_tx, mcast_rx) = mpsc::channel(100);
@@ -96,6 +96,7 @@ impl DeviceServer {
       tokio::spawn(crate::arc_server::run_server(
         self_info.clone(),
         state_storage.clone(),
+        mdns_handle.clone(),
         mcast_tx.clone(),
         channels_sub_rx.clone(),
         tx_flows_info.clone(),
@@ -111,7 +112,7 @@ impl DeviceServer {
 
     let shutdown_todo = async move {
       shutdown_send.send(()).unwrap();
-      mdns_handle.shutdown().unwrap();
+      //mdns_handle.shutdown().unwrap();
       for task in tasks {
         task.await.unwrap();
       }
