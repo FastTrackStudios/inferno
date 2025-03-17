@@ -54,12 +54,6 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 * Inferno2pipe is clocked by incoming media flows. When nothing is connected, "time will stop" (i.e. recording will pause) until something is connected again - silence won't be generated unless at least one channel is connected.
 * it will not start if there is no default route in OS routing table
 
-Disclaimer: Dante uses technology patented by Audinate. This source code may use these patents too. Consult a lawyer if you want to:
-* make money of it
-* distribute binaries in (or from) a region where software patents apply
-
-This project makes no claim to be either authorized or approved by Audinate.
-
 
 # Quick start
 1. [Install Rust](https://rustup.rs/)
@@ -76,6 +70,22 @@ This project makes no claim to be either authorized or approved by Audinate.
    * virtual soundcard for ALSA: [`alsa_pcm_inferno`](alsa_pcm_inferno/README.md) - also works with PipeWire, should work with JACK (not tested yet)
 6. `cargo build`
 7. Follow the instructions in README of the specific program/library
+
+
+# Legal and moral stuff
+Disclaimer: Dante uses technology patented by Audinate. This source code may use these patents too. Consult a lawyer if you want to:
+* make money of it
+* distribute binaries in (or from) a region where software patents apply
+
+This project makes no claim to be either authorized or approved by Audinate.
+
+Please do not use this project to make counterfeit Dante devices/software, it is both immoral and illegal (while Audinate's approach is only immoral). Always specify that the implementation is unofficial and not endorsed by Audinate. Probably you can legally say that it is compatible with a subset of Dante protocol, but IANAL.
+
+## License
+This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You may choose which license to use, or retain both. For example:
+
+* if you want to integrate it into a project already licensed under the GPL, you have the rights to do so.
+* if you want to fork it into something working in cloud (or public Internet in general), it will be beneficial to the Free Software Community to use the AGPL **and remove** GPL when forking.
 
 
 # Tested with
@@ -120,7 +130,9 @@ This project makes no claim to be either authorized or approved by Audinate.
 # Contributing
 Issue reports and pull requests are welcome.
 
-By submitting any contribution, you agree that it will be distributed according to the comment found at the top of `inferno_aoip/src/lib.rs` file - under the terms of GNU GPL v3 or any later version.
+By submitting any contribution, you agree that it will be distributed according to the comment found at the top of `inferno_aoip/src/lib.rs` file - under the terms of GNU GPL v3 or any later version, or GNU AGPL v3 or any later version.
+
+If you want to fork this project into something working in cloud (or public Internet in general), you may consider removing the GPL license and retaining AGPL.
 
 Please use editor respecting `.editorconfig` (for example, VSCode needs an extension: [EditorConfig for VS Code](https://open-vsx.org/extension/EditorConfig/EditorConfig)) or configure it approprietly manually.
 
