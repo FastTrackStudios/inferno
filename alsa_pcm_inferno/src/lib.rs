@@ -580,7 +580,10 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
     let num_channels = match (*io).stream {
         SND_PCM_STREAM_CAPTURE => self_info.rx_channels.len(),
         SND_PCM_STREAM_PLAYBACK => self_info.tx_channels.len(),
-        _ => 0
+        _ => {
+            error!("no stream specified, cannot continue");
+            return -libc::EINVAL;
+        }
     } as u32;
 
     let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_CHANNELS as i32, 1, [num_channels].as_ptr());
@@ -589,37 +592,47 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         return r;
     }
 
+    let powers_of_2 = |first, max| {
+        core::iter::successors(Some(first), move |n| {
+            let r = n*2;
+            if r > max {
+                None
+            } else {
+                Some(r)
+            }
+        })
+    };
+
+    let min_periods = 2;
     let min_samples = 16;
     let min_samples_whole_buffer = 1024; // must be power of 2 and > (max receive latency + ALSA period)
-    let max_samples = 16384;
+    let max_samples = 65536;
     let bytes_per_sample = size_of::<Sample>() as u32;
 
-    let r = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIOD_BYTES as i32, num_channels*bytes_per_sample*min_samples, num_channels*bytes_per_sample*max_samples);
+    let periods_bytes: Vec<std::os::raw::c_uint> = powers_of_2(min_samples, max_samples/min_periods).map(|n| (num_channels*bytes_per_sample*n) as std::os::raw::c_uint).collect();
+    debug!("HW_PERIOD_BYTES: {periods_bytes:?}");
+    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_PERIOD_BYTES as i32, periods_bytes.len() as std::os::raw::c_uint, periods_bytes.as_ptr());
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIOD_BYTES returned {r}");
         return r;
     }
 
-    let buffer_sizes: Vec<std::os::raw::c_uint> = core::iter::successors(Some(min_samples_whole_buffer), |n| {
-        let r = n*2;
-        if r > max_samples {
-            None
-        } else {
-            Some(r)
-        }
-    }).map(|n| (num_channels*bytes_per_sample*n) as std::os::raw::c_uint).collect();
-
+    let buffer_sizes: Vec<std::os::raw::c_uint> = powers_of_2(min_samples_whole_buffer, max_samples).map(|n| (num_channels*bytes_per_sample*n) as std::os::raw::c_uint).collect();
+    debug!("HW_BUFFER_BYTES: {buffer_sizes:?}");
     let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_BUFFER_BYTES as i32, buffer_sizes.len() as std::os::raw::c_uint, buffer_sizes.as_ptr());
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_BUFFER_BYTES returned {r}");
         return r;
     }
 
-    let r = snd_pcm_ioplug_set_param_minmax(io, SND_PCM_IOPLUG_HW_PERIODS as i32, 2, 64);
+    let periods_nums: Vec<std::os::raw::c_uint> = powers_of_2(min_periods, buffer_sizes.last().unwrap()/min_samples).collect();
+    debug!("HW_PERIODS: {periods_nums:?}");
+    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_PERIODS as i32, periods_nums.len() as std::os::raw::c_uint, periods_nums.as_ptr());
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIODS returned {r}");
         return r;
     }
+
 
     *pcmp = (*myio).io.pcm;
 
