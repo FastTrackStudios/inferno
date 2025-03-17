@@ -143,12 +143,10 @@ impl Settings {
     };
 
     // the following should be harmless, as the application still has the chance to overwrite it
-    if let Some(count) = config.get("RX_CHANNELS").map(|s|s.parse().expect("number of channels must be u16")) {
-      result.make_rx_channels(count);
-    }
-    if let Some(count) = config.get("TX_CHANNELS").map(|s|s.parse().expect("number of channels must be u16")) {
-      result.make_tx_channels(count);
-    }
+    let rx_count = config.get("RX_CHANNELS").map(|s|s.parse().expect("number of channels must be u16")).unwrap_or(2);
+    result.make_rx_channels(rx_count);
+    let tx_count = config.get("TX_CHANNELS").map(|s|s.parse().expect("number of channels must be u16")).unwrap_or(2);
+    result.make_tx_channels(tx_count);
     
     result
   }
