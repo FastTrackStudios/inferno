@@ -60,7 +60,7 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 2. If using a firewall, open UDP ports: 4455, 8700, 4400, 8800 (or others if [`INFERNO_ALT_PORT`](#environment-variables) is specified), 5353. Also, allow incoming UDP traffic from possible transmitters (port numbers are allocated by the OS so can't be known beforehand)
 3. <s>If wanting to use anything other than Inferno2pipe,</s> clock synchronization daemon is needed. Inferno is compatible with modified [Statime](https://github.com/pendulum-project/statime):
    * currently, Statime is always needed, even for just capturing audio, but it is not by design and will be fixed
-   * `git clone -b inferno-dev https://github.com/teodly/statime`
+   * `git clone --recurse-submodules -b inferno-dev https://github.com/teodly/statime`
    * `cd statime && cargo build`
    * adjust network interface in `inferno-ptpv1.toml`
    * `sudo target/debug/statime -c inferno-ptpv1.toml`
