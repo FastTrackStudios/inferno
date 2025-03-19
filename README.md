@@ -50,9 +50,7 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 
 ## Quirks, read it before using:
 * Dante protocol is undocumented. Everything was reverse-engineered or based on other reverse-engineering projects. Some things in implementation were guessed. So while it works with my setup, it may not work with yours.
-* channel names can't be changed. If you try to change them, Dante Controller may get confused
 * Inferno2pipe is clocked by incoming media flows. When nothing is connected, "time will stop" (i.e. recording will pause) until something is connected again - silence won't be generated unless at least one channel is connected.
-* it will not start if there is no default route in OS routing table
 
 
 # Quick start
@@ -182,7 +180,7 @@ initial release
 # To do
 likely in order they'll be implementated
 
-* ability to change channel names and settings in Dante Controller
+* ability to change settings in Dante Controller
 * transmit multicast flows
 
 At this point, Inferno will roughly become alternative to Dante Virtual Soundcard.

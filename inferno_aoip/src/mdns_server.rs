@@ -63,8 +63,6 @@ impl DeviceMDNSResponder {
       );
 
     let handle = bb.build(IpVersion::V4).unwrap().run_in_background();
-    // TODO it doesn't work when there is no default gateway in routing table
-    // thread 'main' panicked at 'called `Result::unwrap()` on an `Err` value: MultiIpIoError(V4(Os { code: 101, kind: NetworkUnreachable, message: "Network is unreachable" }))', inferno_aoip/src/mdns_server.rs:55:6
 
     Self { handle: RwLock::new(Some(handle)), self_info }
   }
