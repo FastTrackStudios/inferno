@@ -96,6 +96,7 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
 * Klark Teknik DN32-DANTE (Behringer X32) (based on Dante Brooklyn II)
 * Soundcraft Vi2000 & Vi3000
 * Allen&Heath SQ-5 & SQ-6
+* ESI planet 22c
 * Dante Via @ OS X
 * Dante Virtual Soundcard @ Windows 10
 
@@ -119,13 +120,23 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
 * `searchfire` - fork of [Searchlight](https://github.com/WilliamVenner/searchlight) mDNS crate, modified for compatibility with Dante's mDNS
 
 
-# Environment variables
-* `INFERNO_BIND_IP` - which local IP to bind to. Specifying it may be necessary if you have multiple network interfaces
-* `INFERNO_DEVICE_ID` - 16 hexadecimal digits (8 bytes) used as a device ID. Dante devices usually use MAC address padded with zeros. Inferno uses `0000<IP address>0000` by default. Device ID is the storage key when saving state.
-* `INFERNO_NAME` - name of advertised device. If unspecified, name based on app name and IP address will be generated.
-* `INFERNO_SAMPLE_RATE` - sample rate this device will operate on
-* `INFERNO_PROCESS_ID` - integer number between 0 and 65535. Must be provided and unique when starting multiple instances on a single IP address. Specifying different `INFERNO_DEVICE_ID`s is not sufficient.
-* `INFERNO_ALT_PORT` - start of the range of UDP ports used by socket listeners. If not specified, standard Dante ports as seen in hardware devices will be used. Must be provided when starting multiple instances on a single IP address. Currently 4 ports are used (`INFERNO_ALT_PORT` to `INFERNO_ALT_PORT+3`) but it may change in the future, so better separate different instances by at least 10 ports.
+# Configuration
+Configuration can be set via:
+
+* environment variables - add `INFERNO_` prefix to the setting name
+* ALSA plugin configuration - it is recommended to specify them in your `asoundrc` because too long ALSA device string may be truncated (happens with PipeWire, not sure about other apps)
+
+## Settings
+* `BIND_IP` - which local IP to bind to. Specifying it may be necessary if you have multiple network interfaces
+* `DEVICE_ID` - 16 hexadecimal digits (8 bytes) used as a device ID. Dante devices usually use MAC address padded with zeros. Inferno uses `0000<IP address>0000` by default. Device ID is the storage key when saving state.
+* `NAME` - name of advertised device. If unspecified, name based on app name and IP address will be generated. May be removed in future versions when it becomes settable from DC and so stored in a configuration file.
+* `SAMPLE_RATE` - sample rate this device will operate on
+* `PROCESS_ID` - integer number between 0 and 65535. Must be provided and unique when starting multiple instances on a single IP address. Specifying different `DEVICE_ID`s is not sufficient.
+* `ALT_PORT` - start of the range of UDP ports used by socket listeners. If not specified, standard Dante ports as seen in hardware devices will be used. Must be provided when starting multiple instances on a single IP address. Currently 4 ports are used (`ALT_PORT` to `ALT_PORT+3`) but it may change in the future, so better separate different instances by at least 10 ports.
+* `RX_CHANNELS` - number of receive channels, defaults to 2, will be overwritten by the application if it supports changing channels count.
+* `TX_CHANNELS` - number of transmit channels, defaults to 2, will be overwritten by the application if it supports changing channels count.
+* `RX_LATENCY_NS` - receive latency in nanoseconds, i.e. how much time to wait for media packets, relatively to PTP media clock. Equivalent to latency setting in Dante Controller. Defaults to 10ms. May be removed in future versions when it becomes settable from DC and so stored in a configuration file.
+* `TX_LATENCY_NS` - transmit latency in nanoseconds, i.e. receive latency that this device will demand from devices receiving from us. Equivalent to latency setting in Dante Virtual Soundcard. Defaults to 10ms.
 
 # Contributing
 Issue reports and pull requests are welcome.
@@ -138,6 +149,11 @@ Please use editor respecting `.editorconfig` (for example, VSCode needs an exten
 
 
 # Changelog
+
+## 0.3.2
+* changeable RX & TX channel names
+* RX & TX latency configurable via env var or ALSA plugin parameter
+* relicense to GPL-or-AGPL to simplify forking to AGPL projects, as parts of this project may be useful in cloud applications
 
 ## 0.3.1
 * read configuration from ALSA plugin parameters - useful for multiple sources & sinks in PipeWire

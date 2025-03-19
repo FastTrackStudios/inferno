@@ -2,10 +2,10 @@
 name = "inferno_aoip"
 description = "Unofficial implementation of the Dante protocol (Audio over IP)"
 authors = ["Teo <teodly@lumifaza.org>"]
-license = "GPL-3.0-or-later"
+license = "GPL-3.0-or-later OR AGPL-3.0-or-later"
 keywords = ["AoIP", "audio", "network", "dante", "audinate"]
 categories = ["multimedia::audio", "network-programming"]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

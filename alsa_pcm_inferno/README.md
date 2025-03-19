@@ -13,7 +13,7 @@ Making Dante<->analog converter, or Dante<->Dante bridge, or Dante<->AES67 bridg
 
 Application must support 32-bit signed integer audio samples. (Audacity doesn't, but generally using Audacity directly with this plugin is not a good idea) `plug` plugin shipped with ALSA should work as automatic converter for apps that don't support that format (not tested yet).
 
-To change the number of channels, specify the environment variables `INFERNO_RX_CHANNELS` and `INFERNO_TX_CHANNELS`.
+To change the number of channels, specify the parameters `RX_CHANNELS` and `TX_CHANNELS` of the ALSA `pcm` device.
 
 If you don't want to change anything outside your `$HOME`, you can set ALSA environment variables to make libasound search for configuration file and modules in custom directories. Example is in `test_effect_processor.sh`. This will replace the whole system-wide ALSA configuration with Inferno-only setup for apps that have these environment variables changed.
 
@@ -27,6 +27,7 @@ So the Inferno ALSA PCM is intended to be constantly running. The easiest way of
 # Quirks
 
 * No matter whether the app does only capture, only playback or both, Inferno will always emulate both capture and playback device (unless number of channels is set to 0). If the app isn't playing audio, Dante devices receiving from Inferno will report broken stream (🚫 in Dante Controller) because, to save CPU, transmitting thread is not run at all then.
-* By default, only a single process can run Inferno because it listens on UDP sockets. To overcome this limitation, specify `INFERNO_ALT_PORT` which will be used as a start of the range of ports. Also specify `INFERNO_PROCESS_ID`, `INFERNO_DEVICE_ID` and `INFERNO_NAME` (see [main README](../README.md#environment-variables) for details) to avoid non-unique identifiers (Dante Controller may suffer from double vision in such cases).
+* By default, only a single process can run Inferno because it listens on UDP sockets. To overcome this limitation, specify `INFERNO_ALT_PORT` which will be used as a start of the range of ports. Also specify `INFERNO_PROCESS_ID`, `INFERNO_DEVICE_ID` and `INFERNO_NAME` (see [main README](../README.md#configuration) for details) to avoid non-unique identifiers (Dante Controller may suffer from double vision in such cases).
   * It is needed when using `alsa_in` and `alsa_out` together with JACK, because these are separate processes.
   * On the other hand, it is not needed when adding a single capture and a single playback device to PipeWire graph, because Inferno looks like a regular ALSA soundcard to PipeWire and it is handled within the PipeWire server itself.
+  * However, if you want to add different Inferno virtual devices (e.g. belonging to different clock domains, or listening on a different IP address) to the PipeWire graph, specify their configuration using ALSA device configuration
