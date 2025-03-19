@@ -1,7 +1,7 @@
 use clap::Parser;
 use log::{error, info};
 use std::io::Write;
-use std::{env, fs::File, mem::size_of};
+use std::{fs::File, mem::size_of};
 
 use inferno_aoip::{DeviceServer, Sample, Settings};
 

@@ -2,30 +2,26 @@ extern crate alsa_sys_all;
 extern crate libc;
 use alsa_sys_all::*;
 
-use core::slice;
 use futures_util::FutureExt;
-use inferno_aoip::utils::{run_future_in_new_thread, LogAndForget};
+use inferno_aoip::utils::run_future_in_new_thread;
 use inferno_aoip::{
-    AtomicSample, Clock, ClockDiff, DeviceId, DeviceInfo, DeviceServer, ExternalBufferParameters,
-    MediaClock, PositionReportDestination, RealTimeClockReceiver, Sample, Settings,
+    AtomicSample, Clock, DeviceId, DeviceServer, ExternalBufferParameters,
+    MediaClock, RealTimeClockReceiver, Sample, Settings,
 };
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use libc::{
-    c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN,
+    c_char, c_int, c_void, eventfd, EFD_CLOEXEC, EPIPE, POLLIN,
 };
 use log::{debug, error};
-use std::borrow::BorrowMut;
-use std::collections::{BTreeMap, VecDeque};
-use std::env;
+use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::mem::zeroed;
 use std::num::Wrapping;
-use std::ptr::{null, null_mut};
-use std::sync::atomic::{self, AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::thread::{sleep, JoinHandle};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 
 struct StartArgs {
@@ -389,7 +385,7 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
             } else {
                 Default::default()
             },
-            on_transfer: Box::new(this.on_transfer.as_ref().clone()),
+            on_transfer: Box::new(this.on_transfer.as_ref()),
         };
         let mut err = false;
         match (*io).stream {
@@ -593,7 +589,7 @@ unsafe extern "C" fn plugin_define(
 
     let efd = eventfd(0, EFD_CLOEXEC);
 
-    let mut callbacks = snd_pcm_ioplug_callback_t {
+    let callbacks = snd_pcm_ioplug_callback_t {
         prepare: Some(plugin_prepare),
         start: Some(plugin_start),
         stop: Some(plugin_stop),

@@ -1,16 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::time::Duration;
 
-use clock_steering::unix::UnixClock;
 use clock_steering::Clock as _;
-use custom_error::custom_error;
-use futures::io::AsyncReadExt;
 use futures::AsyncWriteExt;
-use interprocess::local_socket::tokio::LocalSocketStream;
-use tokio::select;
-use tokio::sync::broadcast;
 pub use usrvclock::AsyncClient as ClockReceiver;
 pub use usrvclock::ClockOverlay;
 use usrvclock::SafeClock;
@@ -46,7 +39,7 @@ impl MediaClock {
   pub fn get_overlay(&self) -> &Option<ClockOverlay> {
     &self.overlay
   }
-  pub fn update_overlay(&mut self, mut overlay: ClockOverlay) {
+  pub fn update_overlay(&mut self, overlay: ClockOverlay) {
     /* if let Some(cur_overlay) = self.overlay {
       let cur_ovl_time = cur_overlay.now_ns();
       let new_ovl_time = overlay.now_ns();
@@ -102,7 +95,7 @@ pub fn start_clock_receiver(path: Option<PathBuf>) -> ClockReceiver {
 
 pub async fn make_shared_media_clock(receiver: &ClockReceiver) -> Arc<RwLock<MediaClock>> {
   let mut rx = receiver.subscribe();
-  let mut media_clock = MediaClock::new();
+  let media_clock = MediaClock::new();
   /* loop {
     match rx.recv().await {
       Ok(overlay) => {

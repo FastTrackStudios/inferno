@@ -3,11 +3,9 @@ use crate::channels_subscriber::ChannelsSubscriber;
 use crate::common::*;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::mcast::make_packet;
-use crate::AtomicSample;
 use crate::MediaClock;
 use crate::{byte_utils::write_str_to_buffer, device_info::DeviceInfo};
 use bytebuffer::ByteBuffer;
-use itertools::Itertools;
 use std::sync::atomic::Ordering;
 use std::sync::RwLock;
 use std::{

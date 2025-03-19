@@ -1,10 +1,7 @@
 use log::{error, info};
 
-use std::{
-  net::{IpAddr, Ipv4Addr, SocketAddr},
-  time::Duration,
-};
-use tokio::{net::UdpSocket, select, sync::broadcast::Receiver, time::sleep};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use tokio::{net::UdpSocket, select, sync::broadcast::Receiver};
 
 pub const MTU: usize = 1500;
 const PACKET_BUFFER_SIZE: usize = MTU;

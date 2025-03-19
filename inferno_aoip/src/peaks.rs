@@ -1,7 +1,6 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::{
-  info_mcast_server::PeaksCallback,
   ring_buffer::{ProxyToBuffer, ProxyToSamplesBuffer, RingBufferShared},
   Sample,
 };

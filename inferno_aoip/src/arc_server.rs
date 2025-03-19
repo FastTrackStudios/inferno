@@ -1,10 +1,10 @@
 use crate::channels_subscriber::ChannelsSubscriber;
-use crate::{byte_utils::*, device_info};
+use crate::byte_utils::*;
 
 use crate::device_info::DeviceInfo;
 use crate::flows_control_server::FlowInfo as TXFlowInfo;
 use crate::flows_rx::MAX_FLOWS as MAX_RX_FLOWS;
-use crate::flows_tx::{FPP_MAX_ADVERTISED, FPP_MIN, MAX_CHANNELS_IN_FLOW, MAX_FLOWS as MAX_TX_FLOWS};
+use crate::flows_tx::MAX_FLOWS as MAX_TX_FLOWS;
 use crate::info_mcast_server::MulticastMessage;
 use crate::mdns_server::DeviceMDNSResponder;
 use crate::net_utils::UdpSocketWrapper;
@@ -14,10 +14,7 @@ use crate::protocol::req_resp::HEADER_LENGTH;
 use crate::state_storage::{SavedChannelsSettings, StateStorage};
 use crate::utils::LogAndForget;
 use bytebuffer::{ByteBuffer, Endian};
-use log::{error, info, trace, warn};
-use searchfire::broadcast::{BroadcasterHandle, ServiceBuilder};
-use searchfire::dns::rr::Name;
-use std::net::IpAddr;
+use log::{error, info, trace};
 use std::sync::RwLock;
 use std::{cmp::min, sync::Arc};
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;

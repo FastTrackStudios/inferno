@@ -1,4 +1,3 @@
-use std::fmt::Display;
 
 pub use log::{debug, error, info, trace, warn};
 pub type Sample = i32;

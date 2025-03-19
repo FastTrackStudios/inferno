@@ -3,17 +3,17 @@ use std::{pin::Pin, sync::Arc, time::Duration};
 use crate::{
   common::*,
   device_info::DeviceInfo,
-  media_clock::{async_clock_receiver_to_realtime, ClockOverlay, MediaClock},
+  media_clock::{ClockOverlay, MediaClock},
   real_time_box_channel::{self, RealTimeBoxReceiver, RealTimeBoxSender},
   ring_buffer::{
-    wrap_external_source, ExternalBufferParameters, ProxyToBuffer, ProxyToSamplesBuffer, RBOutput,
+    ProxyToBuffer, ProxyToSamplesBuffer, RBOutput,
   },
 };
 use futures::{Future, FutureExt};
 
 use itertools::Itertools;
 use tokio::{
-  sync::{broadcast, mpsc},
+  sync::mpsc,
   time::interval,
 };
 
@@ -255,7 +255,7 @@ impl<P: ProxyToSamplesBuffer> PeriodicSamplesCollector<P> {
                   readable_samples_count = BUFFER_SIZE.try_into().unwrap();
                 }
                 for chi in 0..self.channels.len() {
-                  let mut buffer = channels_buffers[chi].as_mut_slice();
+                  let buffer = channels_buffers[chi].as_mut_slice();
                   let ch_opt = {
                     if let Some(ch) = &mut self.channels[chi] {
                       // if ch.source.readable_until() changes from None to Some after get_*_timestamp() call,

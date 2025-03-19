@@ -3,7 +3,6 @@ use std::{
   collections::BTreeMap,
   error::Error,
   io,
-  iter::Map,
   net::{Ipv4Addr, SocketAddr, SocketAddrV4},
   str::{self},
 };

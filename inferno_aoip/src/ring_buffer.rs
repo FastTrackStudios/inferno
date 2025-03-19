@@ -2,7 +2,7 @@ use crate::common::*;
 use atomic::{Atomic, Ordering};
 use bool_vec::{boolvec, BoolVec};
 use bytemuck::NoUninit;
-use itertools::{Itertools, Position};
+use itertools::Itertools;
 use std::{
   marker::PhantomData,
   slice,
@@ -250,7 +250,7 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
     }
 
     // Did we have a hole before current invocation?
-    hole |= (self.rb.readable_pos.load(Ordering::Relaxed) != self.rb.writing_pos.load(Ordering::Relaxed));
+    hole |= self.rb.readable_pos.load(Ordering::Relaxed) != self.rb.writing_pos.load(Ordering::Relaxed);
 
     // FIXME: wrapping_add % items_size may result in unexpected behaviour if items_size is not power of 2
     // TODO: ensure that items_size is power of 2

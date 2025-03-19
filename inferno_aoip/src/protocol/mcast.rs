@@ -1,7 +1,6 @@
 use binary_layout::prelude::*;
 
 use crate::byte_utils::*;
-use crate::common::*;
 use crate::info_mcast_server::MulticastMessage;
 
 pub const HEADER_LENGTH: usize = 32;
