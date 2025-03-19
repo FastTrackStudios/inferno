@@ -12,12 +12,9 @@ struct Shared<T> {
 }
 
 pub fn channel<T>(initial: Box<T>) -> (RealTimeBoxSender<T>, RealTimeBoxReceiver<T>) {
-  let shared = Arc::new(Shared {
-    next: AtomicOptionBox::new(None),
-    prev: AtomicOptionBox::new(None),
-  });
+  let shared = Arc::new(Shared { next: AtomicOptionBox::new(None), prev: AtomicOptionBox::new(None) });
   let sender = RealTimeBoxSender(shared.clone());
-  let receiver = RealTimeBoxReceiver{ shared, curr: initial };
+  let receiver = RealTimeBoxReceiver { shared, curr: initial };
   (sender, receiver)
 }
 

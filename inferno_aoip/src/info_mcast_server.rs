@@ -1,11 +1,13 @@
+use crate::byte_utils::*;
 use crate::channels_subscriber::ChannelsSubscriber;
 use crate::common::*;
-use crate::byte_utils::*;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::mcast::make_packet;
 use crate::AtomicSample;
 use crate::MediaClock;
 use crate::{byte_utils::write_str_to_buffer, device_info::DeviceInfo};
+use bytebuffer::ByteBuffer;
+use itertools::Itertools;
 use std::sync::atomic::Ordering;
 use std::sync::RwLock;
 use std::{
@@ -13,8 +15,6 @@ use std::{
   sync::Arc,
   time::Duration,
 };
-use bytebuffer::ByteBuffer;
-use itertools::Itertools;
 use tokio::sync::watch;
 use tokio::time::interval;
 use tokio::{
@@ -51,7 +51,12 @@ struct Multicaster<'s> {
 }
 
 impl<'s> Multicaster<'s> {
-  pub fn new(self_info: &'s DeviceInfo, server: UdpSocketWrapper, clock: Arc<RwLock<MediaClock>>, get_peaks: PeaksCallback) -> Multicaster {
+  pub fn new(
+    self_info: &'s DeviceInfo,
+    server: UdpSocketWrapper,
+    clock: Arc<RwLock<MediaClock>>,
+    get_peaks: PeaksCallback,
+  ) -> Multicaster {
     let patch_version = env!("CARGO_PKG_VERSION_PATCH").parse::<u16>().unwrap();
     let mut r = Multicaster {
       self_info,
@@ -63,7 +68,7 @@ impl<'s> Multicaster<'s> {
         env!("CARGO_PKG_VERSION_MAJOR").parse::<u8>().unwrap(),
         env!("CARGO_PKG_VERSION_MINOR").parse::<u8>().unwrap(),
         H(patch_version),
-        L(patch_version)
+        L(patch_version),
       ],
       device_info_destination: SocketAddr::new(
         IpAddr::V4(Ipv4Addr::new(224, 0, 0, 231)),
@@ -128,15 +133,13 @@ impl<'s> Multicaster<'s> {
     content[0x17] = 0;
 
     content[0xbb] = 0x1f; // if 0, device is flooded with info multicast requests around 1 per second
-    /* content[0xbf] = 5;
-    content[0xc3] = 3;
-    content[0xc7] = 3; */
+                          /* content[0xbf] = 5;
+                          content[0xc3] = 3;
+                          content[0xc7] = 3; */
     write_str_to_buffer(&mut content, 12, 8, &self.self_info.board_name);
     write_str_to_buffer(&mut content, 0x38, 16, &self.self_info.board_name);
 
-    self
-      .send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x60, 0, 0, 0, 0], &content)
-      .await;
+    self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x60, 0, 0, 0, 0], &content).await;
   }
 
   async fn send_product_info(&mut self) {
@@ -148,27 +151,32 @@ impl<'s> Multicaster<'s> {
     // version number:
     content[0x12c..0x130].copy_from_slice(&self.product_version_bytes);
 
-    self
-      .send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0xc0, 0, 0, 0, 0], &content)
-      .await;
+    self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0xc0, 0, 0, 0, 0], &content).await;
   }
 
   fn get_freq_offset_ppb(&self) -> Option<i32> {
-    self.clock.read().unwrap().get_overlay().as_ref().map(|clkovl| {
-      let freq_offset_f = (clkovl.freq_scale_including_hw() * 1_000_000_000f64).round();
-      if i32::MIN as f64 <= freq_offset_f && freq_offset_f <= i32::MAX as f64 {
-        Some(freq_offset_f as i32)
-      } else {
-        None
-      }
-    }).flatten()
+    self
+      .clock
+      .read()
+      .unwrap()
+      .get_overlay()
+      .as_ref()
+      .map(|clkovl| {
+        let freq_offset_f = (clkovl.freq_scale_including_hw() * 1_000_000_000f64).round();
+        if i32::MIN as f64 <= freq_offset_f && freq_offset_f <= i32::MAX as f64 {
+          Some(freq_offset_f as i32)
+        } else {
+          None
+        }
+      })
+      .flatten()
   }
 
   async fn send_heartbeat(&mut self) {
     let ctr = self.seqnum;
     let mut bytes = ByteBuffer::new();
     bytes.set_endian(bytebuffer::Endian::BigEndian);
- 
+
     let freq_offset_opt = self.get_freq_offset_ppb();
 
     if let Some(freq_offset) = freq_offset_opt {
@@ -187,12 +195,14 @@ impl<'s> Multicaster<'s> {
         /* TX Bps, 4B: */ 0x00, 0x00, 0x01, 0xde, /* RX Bps, 4B: */ 0x00, 0x07, 0xdf, 0x17,
         /* TX errors, 4B: */ 0x00, 0x00, 0x00, 0x02, /* RX errors, 4B: */ 0x00, 0x00, 0x00, 0x07,
       ]); // network statistics */
-  
+
       let (rx_peaks, tx_peaks) = (self.get_peaks)();
       let total_peaks = rx_peaks.len() + tx_peaks.len();
       if total_peaks > 0 {
         let mut total_len = 24 + total_peaks;
-        while (total_len % 4) != 0 { total_len += 1; }
+        while (total_len % 4) != 0 {
+          total_len += 1;
+        }
         let end_pos = bytes.get_wpos() + total_len;
         bytes.write_u16((24 + total_peaks).try_into().unwrap());
         bytes.write_u16(0x8002);
@@ -213,7 +223,7 @@ impl<'s> Multicaster<'s> {
           bytes.write_u8(0);
         }
       }
-      
+
       // rx latency:
       if let Some(chsub) = self.channels_subscriber.as_ref() {
         let flows_info = chsub.flows_info();
@@ -230,13 +240,14 @@ impl<'s> Multicaster<'s> {
         bytes.write_u16(24);
         bytes.write_u16(0);
         bytes.write_u32(self.self_info.sample_rate);
-        
+
         for opt in flows_info.iter() {
-          let latency = opt.as_ref().map(|fi|fi.actual_latency_samples.swap(0, Ordering::Relaxed)).unwrap_or(0);
+          let latency =
+            opt.as_ref().map(|fi| fi.actual_latency_samples.swap(0, Ordering::Relaxed)).unwrap_or(0);
           bytes.write_u32(latency.clamp(0, i32::MAX) as u32);
         }
       }
-  
+
       /* bytes.write_bytes(&[
         0x00, 0x1c, 0x80, 0x04,
         0x00, 0x04, 0x00, 0x10,  H(ctr), L(ctr), 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
@@ -251,15 +262,7 @@ impl<'s> Multicaster<'s> {
     }
 
     let content = bytes.as_bytes();
-    self
-      .send(
-        self.heartbeat_destination,
-        0xfffe,
-        [0, 8, 0, 1, 0x10, 0, 0, 0],
-        &content,
-      )
-      .await;
-
+    self.send(self.heartbeat_destination, 0xfffe, [0, 8, 0, 1, 0x10, 0, 0, 0], &content).await;
 
     // this is probably response to 0738008100000064
     /* self.send(
@@ -282,15 +285,13 @@ impl<'s> Multicaster<'s> {
       0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20
     ]).await; */
 
-
     /* self.send(
-      self.device_info_destination, 0xffff, [0x07, 0x2a, 0x10, 0x09, 0x00, 0x00, 0x00, 0x00],
-      &[
-        0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00, 0x08, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        /* clock source: */0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x11, 0x11, 0x33,
-        /* transmitting to us??? : */ 0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x11, 0x66, 0x33,
-      ]).await; */
-
+    self.device_info_destination, 0xffff, [0x07, 0x2a, 0x10, 0x09, 0x00, 0x00, 0x00, 0x00],
+    &[
+      0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00, 0x08, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      /* clock source: */0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x11, 0x11, 0x33,
+      /* transmitting to us??? : */ 0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x11, 0x66, 0x33,
+    ]).await; */
   }
 
   async fn send_clock_stats(&mut self) {
@@ -323,7 +324,8 @@ impl<'s> Multicaster<'s> {
       let mut bytes = ByteBuffer::new();
       bytes.set_endian(bytebuffer::Endian::BigEndian);
       bytes.write_bytes(&[
-        0x00, 0x03, 0x00, 0x03 /* 0x01 = PLL not locked */, 0x00, 0x00, 0x00, 0x9f /* was 0xff */,
+        0x00, 0x03, 0x00, 0x03, /* 0x01 = PLL not locked */
+        0x00, 0x00, 0x00, 0x9f, /* was 0xff */
       ]);
       bytes.write_i32(freq_offset);
       bytes.write_bytes(&self.self_info.mac_address.octets());
@@ -331,16 +333,21 @@ impl<'s> Multicaster<'s> {
       bytes.write_bytes(&mc);
       bytes.write_bytes(&mc);
       bytes.write_bytes(&[0u8; 76]);
-      self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00], bytes.as_bytes()).await;
+      self
+        .send(
+          self.device_info_destination,
+          0xffff,
+          [0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00],
+          bytes.as_bytes(),
+        )
+        .await;
     }
   }
 
   async fn send_network_info(&mut self) {
     let mut bytes = ByteBuffer::new();
     bytes.set_endian(bytebuffer::Endian::BigEndian);
-    bytes.write_bytes(&[
-      0x00, 0x01, 0x00, 0x00, 0x00, 0x00
-    ]);
+    bytes.write_bytes(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
     bytes.write_u16(self.self_info.link_speed);
     bytes.write_u16(1);
     bytes.write_bytes(&self.self_info.mac_address.octets());
@@ -350,16 +357,19 @@ impl<'s> Multicaster<'s> {
     bytes.write_bytes(&self.self_info.gateway.octets()); // DNS? doesn't really matter.
     bytes.write_bytes(&[
       0x00, 0x18, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ]);
-    
-    self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00],
-      bytes.as_bytes()
-    ).await;
+
+    self
+      .send(
+        self.device_info_destination,
+        0xffff,
+        [0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00],
+        bytes.as_bytes(),
+      )
+      .await;
   }
-
 }
-
 
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
@@ -369,7 +379,8 @@ pub async fn run_server(
   get_peaks: PeaksCallback,
   shutdown: BroadcastReceiver<()>,
 ) {
-  let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.info_request_port, shutdown).await;
+  let server =
+    UdpSocketWrapper::new(Some(self_info.ip_address), self_info.info_request_port, shutdown).await;
   let mut mcaster = Multicaster::new(self_info.as_ref(), server, clock, get_peaks);
   mcaster.send_board_info().await;
   mcaster.send_product_info().await;

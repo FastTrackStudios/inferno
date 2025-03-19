@@ -3,11 +3,13 @@ use searchfire::{
   dns::rr::Name,
   net::{IpVersion, TargetInterface},
 };
-use std::{net::IpAddr, sync::{Arc, RwLock}};
+use std::{
+  net::IpAddr,
+  sync::{Arc, RwLock},
+};
 
+use crate::flows_tx::{FPP_MAX_ADVERTISED, FPP_MIN, MAX_CHANNELS_IN_FLOW};
 use crate::{device_info::DeviceInfo, utils::LogAndForget};
-use crate::flows_tx::{FPP_MIN, FPP_MAX_ADVERTISED, MAX_CHANNELS_IN_FLOW};
-
 
 pub struct DeviceMDNSResponder {
   handle: RwLock<Option<BroadcasterHandle>>,
@@ -59,12 +61,10 @@ impl DeviceMDNSResponder {
           .build()
           .unwrap(),
       );
-    
-    let handle = bb.build(IpVersion::V4)
-      .unwrap()
-      .run_in_background();
-      // TODO it doesn't work when there is no default gateway in routing table
-      // thread 'main' panicked at 'called `Result::unwrap()` on an `Err` value: MultiIpIoError(V4(Os { code: 101, kind: NetworkUnreachable, message: "Network is unreachable" }))', inferno_aoip/src/mdns_server.rs:55:6
+
+    let handle = bb.build(IpVersion::V4).unwrap().run_in_background();
+    // TODO it doesn't work when there is no default gateway in routing table
+    // thread 'main' panicked at 'called `Result::unwrap()` on an `Err` value: MultiIpIoError(V4(Os { code: 101, kind: NetworkUnreachable, message: "Network is unreachable" }))', inferno_aoip/src/mdns_server.rs:55:6
 
     Self { handle: RwLock::new(Some(handle)), self_info }
   }
@@ -72,16 +72,17 @@ impl DeviceMDNSResponder {
   pub fn add_tx_channel(&self, index: usize) {
     let self_info = &*self.self_info;
     let service = |ch_name: &str, default: bool| {
-      let name = Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
+      let name =
+        Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
       let mut b = ServiceBuilder::new(service_type("_netaudio-chan"), name, self_info.flows_control_port)
         .unwrap()
         .add_ip_address(IpAddr::V4(self_info.ip_address))
         .add_txt_truncated("txtvers=2")
         .add_txt_truncated("dbcp1=0x1102")
         .add_txt_truncated("dbcp=0x1004")
-        .add_txt_truncated(kv("id", index+1))
+        .add_txt_truncated(kv("id", index + 1))
         .add_txt_truncated(kv("rate", self_info.sample_rate))
-        .add_txt_truncated(format!("pcm={} {:x}", self_info.bits_per_sample/8, self_info.pcm_type))
+        .add_txt_truncated(format!("pcm={} {:x}", self_info.bits_per_sample / 8, self_info.pcm_type))
         .add_txt_truncated(kv("enc", self_info.bits_per_sample))
         .add_txt_truncated(kv("en", self_info.bits_per_sample))
         .add_txt_truncated(kv("latency_ns", self_info.latency_ns))
@@ -102,21 +103,22 @@ impl DeviceMDNSResponder {
         if txch.factory_name != *friendly_name {
           handle.add_service(service(&friendly_name, false)).log_and_forget();
         }
-      },
+      }
       None => {
         log::error!("BUG: trying to add channel using BroadcasterHandle after it was shut down");
       }
     };
   }
-  
+
   pub fn remove_tx_channel(&self, index: usize) {
     let self_info = &*self.self_info;
     let remove = |ch_name: &str| {
-      let name = Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
+      let name =
+        Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
       match self.handle.read().unwrap().as_ref() {
         Some(handle) => {
           handle.remove_named_service(service_type("_netaudio-chan"), name).log_and_forget();
-        },
+        }
         None => {
           log::error!("BUG: trying to remove channel using BroadcasterHandle after it was shut down");
         }
@@ -132,6 +134,13 @@ impl DeviceMDNSResponder {
   }
 
   pub fn shutdown_and_join(&self) {
-    self.handle.write().unwrap().take().expect("shutting down more than once").shutdown().log_and_forget();
+    self
+      .handle
+      .write()
+      .unwrap()
+      .take()
+      .expect("shutting down more than once")
+      .shutdown()
+      .log_and_forget();
   }
 }

@@ -1,14 +1,17 @@
 use crate::common::*;
-use std::{marker::PhantomData, slice, sync::{atomic::AtomicUsize, Arc, RwLock}};
 use atomic::{Atomic, Ordering};
 use bool_vec::{boolvec, BoolVec};
 use bytemuck::NoUninit;
 use itertools::{Itertools, Position};
+use std::{
+  marker::PhantomData,
+  slice,
+  sync::{atomic::AtomicUsize, Arc, RwLock},
+};
 
 pub fn wrapsub(a: usize, b: usize) -> isize {
   (a as isize).wrapping_sub(b as isize)
 }
-
 
 pub trait ProxyToBuffer<T> {
   fn len(&self) -> usize;
@@ -18,8 +21,7 @@ pub trait ProxyToBuffer<T> {
   fn unconditional_read(&self) -> bool;
 }
 
-pub trait ProxyToSamplesBuffer: ProxyToBuffer<Atomic<Sample>> {
-}
+pub trait ProxyToSamplesBuffer: ProxyToBuffer<Atomic<Sample>> {}
 
 /// A buffer which owns its data, stored as a `Vec`
 pub struct OwnedBuffer<T>(pub Vec<T>);
@@ -45,8 +47,7 @@ impl<T> ProxyToBuffer<T> for OwnedBuffer<T> {
   }
 }
 
-impl ProxyToSamplesBuffer for OwnedBuffer<Atomic<Sample>> {
-}
+impl ProxyToSamplesBuffer for OwnedBuffer<Atomic<Sample>> {}
 
 /// Buffer which can be invalidated at any time by an external force.
 /// Intended for buffers managed by libraries not written in Rust.
@@ -63,12 +64,12 @@ unsafe impl<T> Sync for ExternalBuffer<T> {}
 
 impl<T> ExternalBuffer<T> {
   /// `ptr` is pointer to start of the buffer
-  /// 
+  ///
   /// `length` is buffer length in items (not in bytes)
-  /// 
+  ///
   /// `valid` is shared and locked reference to flag which should be set to `false` when we are notified that buffer is no longer valid.
   /// (it can't be atomic_bool by design - it must be locked all time the buffer is in use)
-  /// 
+  ///
   /// Safety: user must ensure that ptr & length correspond to a valid memory region containing a slice `[T; length]`
   unsafe fn new(ptr: *const T, length: usize, valid: Arc<RwLock<bool>>) -> Self {
     Self { ptr, length, valid }
@@ -78,7 +79,7 @@ impl<T> ExternalBuffer<T> {
 impl<T> ProxyToBuffer<T> for ExternalBuffer<T> {
   #[inline(always)]
   fn len(&self) -> usize {
-      self.length
+    self.length
   }
   #[inline(always)]
   fn map<R>(&self, cb: impl FnOnce(&[T]) -> R) -> Option<R> {
@@ -99,8 +100,7 @@ impl<T> ProxyToBuffer<T> for ExternalBuffer<T> {
   }
 }
 
-impl ProxyToSamplesBuffer for ExternalBuffer<Atomic<Sample>> {
-}
+impl ProxyToSamplesBuffer for ExternalBuffer<Atomic<Sample>> {}
 
 #[derive(Clone)]
 pub struct PositionReportDestination {
@@ -127,8 +127,13 @@ pub struct RingBufferShared<T, P: ProxyToBuffer<Atomic<T>>> {
 }
 
 impl<T, P: ProxyToBuffer<Atomic<T>>> RingBufferShared<T, P> {
-  fn new(storage: P, stride: usize, start_time: usize, readable_pos_dest: Option<PositionReportDestination>) -> Arc<Self> {
-    let items_size = (storage.len()+stride-1) / stride;
+  fn new(
+    storage: P,
+    stride: usize,
+    start_time: usize,
+    readable_pos_dest: Option<PositionReportDestination>,
+  ) -> Arc<Self> {
+    let items_size = (storage.len() + stride - 1) / stride;
     Arc::new(RingBufferShared {
       _t: Default::default(),
       buffer: storage,
@@ -161,7 +166,7 @@ impl<T, P: ProxyToBuffer<Atomic<T>>> RingBufferShared<T, P> {
 
 #[inline(always)]
 fn for_in_ring(length: usize, start: usize, end: usize, mut cb: impl FnMut(usize)) {
-  if start==end {
+  if start == end {
     return;
   }
   let w_start = start % length;
@@ -182,9 +187,17 @@ fn for_in_ring(length: usize, start: usize, end: usize, mut cb: impl FnMut(usize
 
 impl<P: ProxyToBuffer<Atomic<Sample>>> RingBufferShared<Sample, P> {
   pub fn peak_sample(&self) -> Sample {
-    self.buffer.map(|buffer| {
-      buffer.iter().step_by(self.stride).map(|s|s.load(Ordering::Relaxed).saturating_abs()).max().unwrap_or(0)
-    }).unwrap_or(0)
+    self
+      .buffer
+      .map(|buffer| {
+        buffer
+          .iter()
+          .step_by(self.stride)
+          .map(|s| s.load(Ordering::Relaxed).saturating_abs())
+          .max()
+          .unwrap_or(0)
+      })
+      .unwrap_or(0)
   }
 }
 
@@ -214,7 +227,11 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
   }
 
   /// returns the position that can be read using accompanying RBOutput
-  pub fn write_from_at(&mut self, start_timestamp: usize, mut input: impl ExactSizeIterator<Item = T>) -> usize {
+  pub fn write_from_at(
+    &mut self,
+    start_timestamp: usize,
+    mut input: impl ExactSizeIterator<Item = T>,
+  ) -> usize {
     let input_len = input.len();
     assert!(input_len < self.rb.items_size);
 
@@ -222,9 +239,14 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
     let mut hole = wrapsub(start_timestamp, self.rb.writing_pos.load(Ordering::Relaxed)) > 0;
     if hole {
       // Mark it appropriately.
-      for_in_ring(self.rb.items_size, self.rb.writing_pos.load(Ordering::Relaxed), start_timestamp, |i| {
-        self.item_ready.set(i, false);
-      });
+      for_in_ring(
+        self.rb.items_size,
+        self.rb.writing_pos.load(Ordering::Relaxed),
+        start_timestamp,
+        |i| {
+          self.item_ready.set(i, false);
+        },
+      );
     }
 
     // Did we have a hole before current invocation?
@@ -255,10 +277,13 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
     if !hole {
       self.rb.readable_pos.store(self.rb.writing_pos.load(Ordering::Relaxed), Ordering::Release);
     }
-    
+
     // If there was a hole, close (write Default to) too old items
     if hole {
-      self.close_items_until_internal(self.rb.writing_pos.load(Ordering::Relaxed).wrapping_sub(self.hole_fix_wait), self.rb.writing_pos.load(Ordering::Relaxed));
+      self.close_items_until_internal(
+        self.rb.writing_pos.load(Ordering::Relaxed).wrapping_sub(self.hole_fix_wait),
+        self.rb.writing_pos.load(Ordering::Relaxed),
+      );
     }
 
     self.rb.commit_readable_pos();
@@ -270,12 +295,17 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
     if wrapsub(close_until_pos, self.rb.readable_pos.load(Ordering::Relaxed)) > 0 {
       let mut hole = false;
       self.rb.buffer.map(|buffer| {
-        for_in_ring(self.rb.items_size, self.rb.readable_pos.load(Ordering::Relaxed), close_until_pos, |i| {
-          if !self.item_ready.get(i).unwrap() {
-            hole = true;
-            buffer[i * self.rb.stride].store(T::default(), Ordering::Relaxed);
-          }
-        });
+        for_in_ring(
+          self.rb.items_size,
+          self.rb.readable_pos.load(Ordering::Relaxed),
+          close_until_pos,
+          |i| {
+            if !self.item_ready.get(i).unwrap() {
+              hole = true;
+              buffer[i * self.rb.stride].store(T::default(), Ordering::Relaxed);
+            }
+          },
+        );
       });
       if hole {
         self.rb.holes_count.fetch_add(1, Ordering::Release);
@@ -288,17 +318,23 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
     if wrapsub(check_until_pos, self.rb.readable_pos.load(Ordering::Relaxed)) > 0 {
       let mut ready = true;
       let mut new_readable_pos = self.rb.readable_pos.load(Ordering::Relaxed);
-      for_in_ring(self.rb.items_size, self.rb.readable_pos.load(Ordering::Relaxed), check_until_pos, |i| {
-        if !ready { return; }
-        if self.item_ready.get(i).unwrap() {
-          new_readable_pos += 1;
-        } else {
-          ready = false;
-        }
-      });
+      for_in_ring(
+        self.rb.items_size,
+        self.rb.readable_pos.load(Ordering::Relaxed),
+        check_until_pos,
+        |i| {
+          if !ready {
+            return;
+          }
+          if self.item_ready.get(i).unwrap() {
+            new_readable_pos += 1;
+          } else {
+            ready = false;
+          }
+        },
+      );
       self.rb.readable_pos.store(new_readable_pos, Ordering::Release);
     }
-    
   }
 
   pub fn close_items_until(&self, mut until_pos: usize) {
@@ -326,8 +362,6 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
     self.rb.commit_readable_pos();
   }
 }
-
-
 
 /// Result of the `RBOutput::read_at` function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,14 +414,24 @@ impl<T: NoUninit, P: ProxyToBuffer<Atomic<T>>> RBOutput<T, P> {
     //let wrapped_end_ts = start_timestamp.wrapping_add(output_len) % self.rb.items_size;
     let mut out_index = 0;
 
-    if self.rb.buffer.map(|buffer| {
-      atomic::fence(Ordering::Acquire);
-      for_in_ring(self.rb.items_size, start_timestamp, start_timestamp.wrapping_add(output_len), |rb_index| {
-        //debug!("reading from RB index {rb_index}");
-        output[out_index] = buffer[rb_index * self.rb.stride].load(Ordering::Relaxed);
-        out_index += 1;
-      });
-    }).is_none() {
+    if self
+      .rb
+      .buffer
+      .map(|buffer| {
+        atomic::fence(Ordering::Acquire);
+        for_in_ring(
+          self.rb.items_size,
+          start_timestamp,
+          start_timestamp.wrapping_add(output_len),
+          |rb_index| {
+            //debug!("reading from RB index {rb_index}");
+            output[out_index] = buffer[rb_index * self.rb.stride].load(Ordering::Relaxed);
+            out_index += 1;
+          },
+        );
+      })
+      .is_none()
+    {
       return ReadResult { useful_start_index: 0, useful_end_index: 0 };
     }
 
@@ -397,7 +441,10 @@ impl<T: NoUninit, P: ProxyToBuffer<Atomic<T>>> RBOutput<T, P> {
       if diff > self.rb.items_size.try_into().unwrap() {
         // data has been overwritten in the meantime, so some data at the beginning of the buffer may be wrong
         let overwritten = diff as usize - self.rb.items_size;
-        return ReadResult { useful_start_index: overwritten.min(output_len), useful_end_index: output_len };
+        return ReadResult {
+          useful_start_index: overwritten.min(output_len),
+          useful_end_index: output_len,
+        };
       }
     }
 
@@ -412,11 +459,15 @@ impl<T: NoUninit, P: ProxyToBuffer<Atomic<T>>> RBOutput<T, P> {
   }
 }
 
-pub fn new_owned<T: Default>(length: usize, start_time: usize, hole_fix_wait: usize) -> (RBInput<T, OwnedBuffer<Atomic<T>>>, RBOutput<T, OwnedBuffer<Atomic<T>>>) {
+pub fn new_owned<T: Default>(
+  length: usize,
+  start_time: usize,
+  hole_fix_wait: usize,
+) -> (RBInput<T, OwnedBuffer<Atomic<T>>>, RBOutput<T, OwnedBuffer<Atomic<T>>>) {
   let shared = RingBufferShared::new(OwnedBuffer::<Atomic<T>>::new(length), 1, start_time, None);
   (
-    RBInput{ rb: shared.clone(), item_ready: boolvec![false; shared.items_size], hole_fix_wait },
-    RBOutput{ rb: shared }
+    RBInput { rb: shared.clone(), item_ready: boolvec![false; shared.items_size], hole_fix_wait },
+    RBOutput { rb: shared },
   )
 }
 
@@ -460,30 +511,43 @@ pub struct ExternalBufferParameters<T> {
 unsafe impl<T> Send for ExternalBufferParameters<T> {}
 unsafe impl<T> Sync for ExternalBufferParameters<T> {}
 
-
 impl<T> ExternalBufferParameters<T> {
-  pub unsafe fn new(ptr: *const Atomic<T>, length: usize, stride: usize, valid: Arc<RwLock<bool>>, readable_pos_dest: Option<PositionReportDestination>) -> Self {
+  pub unsafe fn new(
+    ptr: *const Atomic<T>,
+    length: usize,
+    stride: usize,
+    valid: Arc<RwLock<bool>>,
+    readable_pos_dest: Option<PositionReportDestination>,
+  ) -> Self {
     Self { ptr, length, stride, valid, readable_pos_dest }
   }
 }
 
-
 // safety: ExternalBufferParameters::new is unsafe so user acknowledges the dangers when creating the `par` struct
-pub fn shared_from_external<T: Default>(par: &ExternalBufferParameters<T>, start_time: usize) -> Arc<RingBufferShared<T, ExternalBuffer<Atomic<T>>>> {
+pub fn shared_from_external<T: Default>(
+  par: &ExternalBufferParameters<T>,
+  start_time: usize,
+) -> Arc<RingBufferShared<T, ExternalBuffer<Atomic<T>>>> {
   let external = unsafe { ExternalBuffer::<Atomic<T>>::new(par.ptr, par.length, par.valid.clone()) };
   RingBufferShared::new(external, par.stride, start_time, par.readable_pos_dest.clone())
 }
 
-pub fn wrap_external_source<T: Default>(par: &ExternalBufferParameters<T>, start_time: usize) -> RBOutput<T, ExternalBuffer<Atomic<T>>> {
-  RBOutput{ rb: shared_from_external(par, start_time) }
+pub fn wrap_external_source<T: Default>(
+  par: &ExternalBufferParameters<T>,
+  start_time: usize,
+) -> RBOutput<T, ExternalBuffer<Atomic<T>>> {
+  RBOutput { rb: shared_from_external(par, start_time) }
 }
 
-pub fn wrap_external_sink<T: Default>(par: &ExternalBufferParameters<T>, start_time: usize, hole_fix_wait: usize) -> RBInput<T, ExternalBuffer<Atomic<T>>> {
+pub fn wrap_external_sink<T: Default>(
+  par: &ExternalBufferParameters<T>,
+  start_time: usize,
+  hole_fix_wait: usize,
+) -> RBInput<T, ExternalBuffer<Atomic<T>>> {
   let shared = shared_from_external(par, start_time);
   let items_size = shared.items_size;
-  RBInput{ rb: shared, item_ready: boolvec![false; items_size], hole_fix_wait }
+  RBInput { rb: shared, item_ready: boolvec![false; items_size], hole_fix_wait }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -493,54 +557,58 @@ mod tests {
 
   #[test]
   fn test_sequential_single_write_read() {
-      let (mut input, output) = new_owned(16, 0, 4);
+    let (mut input, output) = new_owned(16, 0, 4);
 
-      let writer = thread::spawn(move || {
-          for i in 0..16 {
-              input.write_from_at(i, std::iter::once(i as i32));
-          }
-      });
+    let writer = thread::spawn(move || {
+      for i in 0..16 {
+        input.write_from_at(i, std::iter::once(i as i32));
+      }
+    });
 
-      let reader = thread::spawn(move || {
-          let mut read_values = vec![0; 16];
-          for i in 0..16 {
-              while output.read_at(i, &mut read_values[i..i+1]) != (ReadResult{useful_start_index: 0, useful_end_index: 1}) {
-                  thread::yield_now();
-              }
-          }
-          assert_eq!(read_values, (0..16).collect::<Vec<_>>());
-      });
+    let reader = thread::spawn(move || {
+      let mut read_values = vec![0; 16];
+      for i in 0..16 {
+        while output.read_at(i, &mut read_values[i..i + 1])
+          != (ReadResult { useful_start_index: 0, useful_end_index: 1 })
+        {
+          thread::yield_now();
+        }
+      }
+      assert_eq!(read_values, (0..16).collect::<Vec<_>>());
+    });
 
-      writer.join().unwrap();
-      reader.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
   }
 
   fn non_sequential_write_single_read(wait: usize, expected: Vec<i32>) {
-      let (mut input, output) = new_owned(16, 0, wait);
+    let (mut input, output) = new_owned(16, 0, wait);
 
-      let barrier = Arc::new(Barrier::new(2));
-      let barrier_writer = barrier.clone();
-      let barrier_reader = barrier.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_writer = barrier.clone();
+    let barrier_reader = barrier.clone();
 
-      let writer = thread::spawn(move || {
-          barrier_writer.wait();
-          input.write_from_at(4, (4..8).map(|x| x as i32));
-          input.write_from_at(0, (0..4).map(|x| x as i32));
-      });
+    let writer = thread::spawn(move || {
+      barrier_writer.wait();
+      input.write_from_at(4, (4..8).map(|x| x as i32));
+      input.write_from_at(0, (0..4).map(|x| x as i32));
+    });
 
-      let reader = thread::spawn(move || {
-          barrier_reader.wait();
-          let mut read_values = vec![0; 8];
-          for i in 0..8 {
-              while output.read_at(i, &mut read_values[i..i+1]) != (ReadResult{useful_start_index: 0, useful_end_index: 1}) {
-                  thread::yield_now();
-              }
-          }
-          assert_eq!(read_values, expected);
-      });
+    let reader = thread::spawn(move || {
+      barrier_reader.wait();
+      let mut read_values = vec![0; 8];
+      for i in 0..8 {
+        while output.read_at(i, &mut read_values[i..i + 1])
+          != (ReadResult { useful_start_index: 0, useful_end_index: 1 })
+        {
+          thread::yield_now();
+        }
+      }
+      assert_eq!(read_values, expected);
+    });
 
-      writer.join().unwrap();
-      reader.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
   }
 
   #[test]
@@ -554,222 +622,239 @@ mod tests {
 
   #[test]
   fn test_fixed_hole_single_read() {
-      let (mut input, output) = new_owned(16, 0, 6);
+    let (mut input, output) = new_owned(16, 0, 6);
 
-      let barrier = Arc::new(Barrier::new(2));
-      let barrier_writer = barrier.clone();
-      let barrier_reader = barrier.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_writer = barrier.clone();
+    let barrier_reader = barrier.clone();
 
-      let writer = thread::spawn(move || {
-          barrier_writer.wait();
-          input.write_from_at(0, (0..2).map(|x| x as i32)); // write 0, 1
-          input.write_from_at(4, (4..8).map(|x| x as i32)); // write 4, 5, 6, 7
-          thread::sleep(std::time::Duration::from_millis(100));
-          input.write_from_at(2, (2..4).map(|x| x as i32)); // write 2, 3 to fix the hole
-      });
+    let writer = thread::spawn(move || {
+      barrier_writer.wait();
+      input.write_from_at(0, (0..2).map(|x| x as i32)); // write 0, 1
+      input.write_from_at(4, (4..8).map(|x| x as i32)); // write 4, 5, 6, 7
+      thread::sleep(std::time::Duration::from_millis(100));
+      input.write_from_at(2, (2..4).map(|x| x as i32)); // write 2, 3 to fix the hole
+    });
 
-      let reader = thread::spawn(move || {
-          barrier_reader.wait();
-          let mut read_values = vec![0; 8];
-          for i in 0..8 {
-              while output.read_at(i, &mut read_values[i..i+1]) != (ReadResult{useful_start_index: 0, useful_end_index: 1}) {
-                  thread::yield_now();
-              }
-          }
-          assert_eq!(read_values, (0..8).collect::<Vec<_>>());
-      });
+    let reader = thread::spawn(move || {
+      barrier_reader.wait();
+      let mut read_values = vec![0; 8];
+      for i in 0..8 {
+        while output.read_at(i, &mut read_values[i..i + 1])
+          != (ReadResult { useful_start_index: 0, useful_end_index: 1 })
+        {
+          thread::yield_now();
+        }
+      }
+      assert_eq!(read_values, (0..8).collect::<Vec<_>>());
+    });
 
-      writer.join().unwrap();
-      reader.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
   }
-
 
   #[test]
   fn test_too_large_hole_single_read() {
-      let (mut input, output) = new_owned(16, 0, 3);
+    let (mut input, output) = new_owned(16, 0, 3);
 
-      let barrier = Arc::new(Barrier::new(2));
-      let barrier_writer = barrier.clone();
-      let barrier_reader = barrier.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_writer = barrier.clone();
+    let barrier_reader = barrier.clone();
 
-      let writer = thread::spawn(move || {
-          input.write_from_at(0, vec![-1; 8].into_iter());
-          input.write_from_at(8, vec![-1; 8].into_iter());
-          input.write_from_at(16, (0..2).map(|x| x as i32)); // write 0, 1
-          input.write_from_at(16+4, (4..8).map(|x| x as i32)); // write 4, 5, 6, 7
-          thread::sleep(std::time::Duration::from_millis(100));
-          //input.write_from_at(16+8, [].into_iter());
-          // TODO: what if the following happens? (data arrives too late and breaks something)
-          //input.write_from_at(2, (2..4).map(|x| x as i32)); // write 2, 3 to fix the hole
-          barrier_writer.wait();
-      });
+    let writer = thread::spawn(move || {
+      input.write_from_at(0, vec![-1; 8].into_iter());
+      input.write_from_at(8, vec![-1; 8].into_iter());
+      input.write_from_at(16, (0..2).map(|x| x as i32)); // write 0, 1
+      input.write_from_at(16 + 4, (4..8).map(|x| x as i32)); // write 4, 5, 6, 7
+      thread::sleep(std::time::Duration::from_millis(100));
+      //input.write_from_at(16+8, [].into_iter());
+      // TODO: what if the following happens? (data arrives too late and breaks something)
+      //input.write_from_at(2, (2..4).map(|x| x as i32)); // write 2, 3 to fix the hole
+      barrier_writer.wait();
+    });
 
-      let reader = thread::spawn(move || {
-          barrier_reader.wait();
-          let mut read_values = vec![0; 8];
-          for i in 0..8 {
-              while output.read_at(i+16, &mut read_values[i..i+1]) != (ReadResult{useful_start_index: 0, useful_end_index: 1}) {
-                  thread::yield_now();
-              }
-          }
-          let mut expected = (0..8).collect::<Vec<_>>();
-          expected[2] = 0;
-          expected[3] = 0;
-          assert_eq!(read_values, expected);
-      });
+    let reader = thread::spawn(move || {
+      barrier_reader.wait();
+      let mut read_values = vec![0; 8];
+      for i in 0..8 {
+        while output.read_at(i + 16, &mut read_values[i..i + 1])
+          != (ReadResult { useful_start_index: 0, useful_end_index: 1 })
+        {
+          thread::yield_now();
+        }
+      }
+      let mut expected = (0..8).collect::<Vec<_>>();
+      expected[2] = 0;
+      expected[3] = 0;
+      assert_eq!(read_values, expected);
+    });
 
-      writer.join().unwrap();
-      reader.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
   }
-
 
   #[test]
   fn test_write_read() {
-      let (mut input, output) = new_owned(16, 0, 4);
+    let (mut input, output) = new_owned(16, 0, 4);
 
-      let writer = thread::spawn(move || {
-          input.write_from_at(0, (0..8).map(|x| x as i32)); // write 8 items at once
-          input.write_from_at(8, (8..16).map(|x| x as i32)); // write another 8 items at once
-      });
+    let writer = thread::spawn(move || {
+      input.write_from_at(0, (0..8).map(|x| x as i32)); // write 8 items at once
+      input.write_from_at(8, (8..16).map(|x| x as i32)); // write another 8 items at once
+    });
 
-      let reader = thread::spawn(move || {
-          let mut read_values = vec![0; 16];
-          while output.read_at(0, &mut read_values[0..8]) != (ReadResult{useful_start_index: 0, useful_end_index: 8}) {
-              thread::yield_now();
-          }
-          while output.read_at(8, &mut read_values[8..16]) != (ReadResult{useful_start_index: 0, useful_end_index: 8}) {
-              thread::yield_now();
-          }
-          assert_eq!(read_values, (0..16).collect::<Vec<_>>());
-      });
+    let reader = thread::spawn(move || {
+      let mut read_values = vec![0; 16];
+      while output.read_at(0, &mut read_values[0..8])
+        != (ReadResult { useful_start_index: 0, useful_end_index: 8 })
+      {
+        thread::yield_now();
+      }
+      while output.read_at(8, &mut read_values[8..16])
+        != (ReadResult { useful_start_index: 0, useful_end_index: 8 })
+      {
+        thread::yield_now();
+      }
+      assert_eq!(read_values, (0..16).collect::<Vec<_>>());
+    });
 
-      writer.join().unwrap();
-      reader.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
   }
 
   #[test]
   fn test_wraparound_separate() {
-      let (mut input, output) = new_owned(16, 0, 4);
+    let (mut input, output) = new_owned(16, 0, 4);
 
-      let barrier = Arc::new(Barrier::new(2));
-      let barrier_writer = barrier.clone();
-      let barrier_reader = barrier.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_writer = barrier.clone();
+    let barrier_reader = barrier.clone();
 
-      let writer = thread::spawn(move || {
-          barrier_writer.wait();
-          input.write_from_at(12, (12..16).map(|x| x as i32)); // write near the end
-          input.write_from_at(16, (16..20).map(|x| x as i32)); // wrap around to the beginning
-      });
+    let writer = thread::spawn(move || {
+      barrier_writer.wait();
+      input.write_from_at(12, (12..16).map(|x| x as i32)); // write near the end
+      input.write_from_at(16, (16..20).map(|x| x as i32)); // wrap around to the beginning
+    });
 
-      let reader = thread::spawn(move || {
-          barrier_reader.wait();
-          let mut read_values = vec![0; 8];
-          while output.read_at(12, &mut read_values[0..4]) != (ReadResult{useful_start_index: 0, useful_end_index: 4}) {
-              thread::yield_now();
-          }
-          while output.read_at(16, &mut read_values[4..8]) != (ReadResult{useful_start_index: 0, useful_end_index: 4}) {
-              thread::yield_now();
-          }
-          let expected: Vec<i32> = (12..20).collect();
-          assert_eq!(&read_values[0..4], &expected[0..4]);
-          assert_eq!(&read_values[4..8], &expected[4..8]);
-      });
+    let reader = thread::spawn(move || {
+      barrier_reader.wait();
+      let mut read_values = vec![0; 8];
+      while output.read_at(12, &mut read_values[0..4])
+        != (ReadResult { useful_start_index: 0, useful_end_index: 4 })
+      {
+        thread::yield_now();
+      }
+      while output.read_at(16, &mut read_values[4..8])
+        != (ReadResult { useful_start_index: 0, useful_end_index: 4 })
+      {
+        thread::yield_now();
+      }
+      let expected: Vec<i32> = (12..20).collect();
+      assert_eq!(&read_values[0..4], &expected[0..4]);
+      assert_eq!(&read_values[4..8], &expected[4..8]);
+    });
 
-      writer.join().unwrap();
-      reader.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
   }
 
   #[test]
   fn test_wraparound() {
-      let (mut input, output) = new_owned(16, 0, 4);
+    let (mut input, output) = new_owned(16, 0, 4);
 
-      let barrier = Arc::new(Barrier::new(2));
-      let barrier_writer = barrier.clone();
-      let barrier_reader = barrier.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_writer = barrier.clone();
+    let barrier_reader = barrier.clone();
 
-      let writer = thread::spawn(move || {
-          barrier_writer.wait();
-          input.write_from_at(14, (14..18).map(|x| x as i32)); // write across the boundary
-          input.write_from_at(18, (100..102).map(|x| x as i32)); // fix hole 0..14, TODO: handle it properly in write_from_at
-      });
+    let writer = thread::spawn(move || {
+      barrier_writer.wait();
+      input.write_from_at(14, (14..18).map(|x| x as i32)); // write across the boundary
+      input.write_from_at(18, (100..102).map(|x| x as i32)); // fix hole 0..14, TODO: handle it properly in write_from_at
+    });
 
-      let reader = thread::spawn(move || {
-          barrier_reader.wait();
-          let mut read_values = vec![0; 4];
-          while output.read_at(14, &mut read_values) != (ReadResult{useful_start_index: 0, useful_end_index: 4}) {
-              thread::yield_now();
-          }
-          let expected: Vec<i32> = (14..18).collect();
-          assert_eq!(read_values, expected);
-      });
+    let reader = thread::spawn(move || {
+      barrier_reader.wait();
+      let mut read_values = vec![0; 4];
+      while output.read_at(14, &mut read_values)
+        != (ReadResult { useful_start_index: 0, useful_end_index: 4 })
+      {
+        thread::yield_now();
+      }
+      let expected: Vec<i32> = (14..18).collect();
+      assert_eq!(read_values, expected);
+    });
 
-      writer.join().unwrap();
-      reader.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
   }
 
   #[test]
   fn test_wraparound_hole_fix_with_0() {
-      let (mut input, output) = new_owned(16, 0, 4);
+    let (mut input, output) = new_owned(16, 0, 4);
 
-      let barrier = Arc::new(Barrier::new(2));
-      let barrier_writer = barrier.clone();
-      let barrier_reader = barrier.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_writer = barrier.clone();
+    let barrier_reader = barrier.clone();
 
-      let writer = thread::spawn(move || {
-          barrier_writer.wait();
-          input.write_from_at(14, (14..18).map(|x| x as i32)); // write across the boundary
-          thread::sleep(std::time::Duration::from_millis(100));
-          input.write_from_at(18, (18..22).map(|x| x as i32)); // fix the hole and wrap around the start
-      });
+    let writer = thread::spawn(move || {
+      barrier_writer.wait();
+      input.write_from_at(14, (14..18).map(|x| x as i32)); // write across the boundary
+      thread::sleep(std::time::Duration::from_millis(100));
+      input.write_from_at(18, (18..22).map(|x| x as i32)); // fix the hole and wrap around the start
+    });
 
-      let reader = thread::spawn(move || {
-          barrier_reader.wait();
-          let mut read_values = vec![0; 10];
-          while output.read_at(12, &mut read_values[0..6]) != (ReadResult{useful_start_index: 0, useful_end_index: 6}) {
-              thread::yield_now();
-          }
-          while output.read_at(18, &mut read_values[6..10]) != (ReadResult{useful_start_index: 0, useful_end_index: 4}) {
-              thread::yield_now();
-          }
-          let expected: Vec<i32> = vec![0; 2].into_iter().chain(14..22).collect();
-          assert_eq!(read_values, expected);
-      });
+    let reader = thread::spawn(move || {
+      barrier_reader.wait();
+      let mut read_values = vec![0; 10];
+      while output.read_at(12, &mut read_values[0..6])
+        != (ReadResult { useful_start_index: 0, useful_end_index: 6 })
+      {
+        thread::yield_now();
+      }
+      while output.read_at(18, &mut read_values[6..10])
+        != (ReadResult { useful_start_index: 0, useful_end_index: 4 })
+      {
+        thread::yield_now();
+      }
+      let expected: Vec<i32> = vec![0; 2].into_iter().chain(14..22).collect();
+      assert_eq!(read_values, expected);
+    });
 
-      writer.join().unwrap();
-      reader.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
   }
 
   #[test]
   fn test_hole_fix_with_0() {
-      let (mut input, output) = new_owned(16, 0, 4);
+    let (mut input, output) = new_owned(16, 0, 4);
 
-      let barrier = Arc::new(Barrier::new(2));
-      let barrier_writer = barrier.clone();
-      let barrier_reader = barrier.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_writer = barrier.clone();
+    let barrier_reader = barrier.clone();
 
-      let writer = thread::spawn(move || {
-          barrier_writer.wait();
-          input.write_from_at(0, (0..4).map(|x| x as i32)); // write some items
-          input.write_from_at(8, (8..12).map(|x| x as i32)); // write items creating a hole
-          thread::sleep(std::time::Duration::from_millis(200));
-          input.write_from_at(12, (12..16).map(|x| x as i32)); // write items after hole_fix_wait
-      });
+    let writer = thread::spawn(move || {
+      barrier_writer.wait();
+      input.write_from_at(0, (0..4).map(|x| x as i32)); // write some items
+      input.write_from_at(8, (8..12).map(|x| x as i32)); // write items creating a hole
+      thread::sleep(std::time::Duration::from_millis(200));
+      input.write_from_at(12, (12..16).map(|x| x as i32)); // write items after hole_fix_wait
+    });
 
-      let reader = thread::spawn(move || {
-          barrier_reader.wait();
-          let mut read_values = vec![0; 16];
-          while output.read_at(0, &mut read_values[0..16]) != (ReadResult{useful_start_index: 0, useful_end_index: 16}) {
-              thread::yield_now();
-          }
-          let expected: Vec<i32> = (0..4)
-              .chain(vec![0; 4]) // default values for the hole
-              .chain(8..16)
-              .collect();
-          assert_eq!(read_values, expected);
-      });
+    let reader = thread::spawn(move || {
+      barrier_reader.wait();
+      let mut read_values = vec![0; 16];
+      while output.read_at(0, &mut read_values[0..16])
+        != (ReadResult { useful_start_index: 0, useful_end_index: 16 })
+      {
+        thread::yield_now();
+      }
+      let expected: Vec<i32> = (0..4)
+        .chain(vec![0; 4]) // default values for the hole
+        .chain(8..16)
+        .collect();
+      assert_eq!(read_values, expected);
+    });
 
-      writer.join().unwrap();
-      reader.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
   }
-
 }

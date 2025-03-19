@@ -1,10 +1,21 @@
 use std::{pin::Pin, sync::Arc, time::Duration};
 
-use crate::{common::*, device_info::DeviceInfo, media_clock::{async_clock_receiver_to_realtime, ClockOverlay, MediaClock}, real_time_box_channel::{self, RealTimeBoxReceiver, RealTimeBoxSender}, ring_buffer::{wrap_external_source, ExternalBufferParameters, ProxyToBuffer, ProxyToSamplesBuffer, RBOutput}};
+use crate::{
+  common::*,
+  device_info::DeviceInfo,
+  media_clock::{async_clock_receiver_to_realtime, ClockOverlay, MediaClock},
+  real_time_box_channel::{self, RealTimeBoxReceiver, RealTimeBoxSender},
+  ring_buffer::{
+    wrap_external_source, ExternalBufferParameters, ProxyToBuffer, ProxyToSamplesBuffer, RBOutput,
+  },
+};
 use futures::{Future, FutureExt};
 
 use itertools::Itertools;
-use tokio::{sync::{broadcast, mpsc}, time::interval};
+use tokio::{
+  sync::{broadcast, mpsc},
+  time::interval,
+};
 
 const READ_INTERVAL: Duration = Duration::from_millis(50);
 const BUFFER_SIZE: usize = 65536;
@@ -12,7 +23,6 @@ const SANE_CLOCK_DIFF: usize = 192000;
 const MAX_LAG_SAMPLES: Clock = 9600;
 
 pub type SamplesCallback = Box<dyn FnMut(usize, &Vec<Vec<Sample>>) + Send + 'static>;
-
 
 struct Channel<P: ProxyToSamplesBuffer> {
   id: usize,
@@ -41,7 +51,11 @@ impl<P: ProxyToSamplesBuffer> Channel<P> {
     let r = self.source.read_at(start_timestamp as usize, buffer);
     if r.useful_start_index != 0 {
       if self.was_connected {
-        self.report_lost_samples(start_timestamp, r.useful_start_index, "buffer underrun or overwritten in the meantime");
+        self.report_lost_samples(
+          start_timestamp,
+          r.useful_start_index,
+          "buffer underrun or overwritten in the meantime",
+        );
         good = false;
       }
       // clear whatever junk data was contained at the beginning of buffer
@@ -54,7 +68,11 @@ impl<P: ProxyToSamplesBuffer> Channel<P> {
     }
     if r.useful_end_index != buffer.len() {
       if self.was_connected {
-        self.report_lost_samples( start_timestamp.wrapping_add(r.useful_end_index.try_into().unwrap()), buffer.len()-r.useful_end_index, "buffer underrun");
+        self.report_lost_samples(
+          start_timestamp.wrapping_add(r.useful_end_index.try_into().unwrap()),
+          buffer.len() - r.useful_end_index,
+          "buffer underrun",
+        );
         good = false;
       }
       for sample in &mut buffer[r.useful_end_index..] {
@@ -62,7 +80,11 @@ impl<P: ProxyToSamplesBuffer> Channel<P> {
       }
     }
     if !good {
-      warn!("wanted {start_timestamp}..{} but has ..{}", start_timestamp + buffer.len(), self.source.readable_until());
+      warn!(
+        "wanted {start_timestamp}..{} but has ..{}",
+        start_timestamp + buffer.len(),
+        self.source.readable_until()
+      );
     }
     good
   }
@@ -78,23 +100,34 @@ pub struct RealTimeSamplesReceiver<P: ProxyToSamplesBuffer> {
 
 impl<P: ProxyToSamplesBuffer> RealTimeSamplesReceiver<P> {
   fn get_min_max_end_timestamps(&self) -> Option<(Clock, Clock)> {
-    get_min_max_end_timestamps(self.channels.iter().map(|chrecv|chrecv.get()))
+    get_min_max_end_timestamps(self.channels.iter().map(|chrecv| chrecv.get()))
   }
   pub fn get_available_num_samples(&mut self, start_timestamp: Clock) -> usize {
-    self.get_min_max_end_timestamps().map(|(end_ts, _)| {
-      let diff = wrapped_diff(end_ts, start_timestamp);
-      if diff > 0 {
-        diff as Clock
-      } else {
-        0
-      }
-    }).unwrap_or(0).try_into().unwrap()
+    self
+      .get_min_max_end_timestamps()
+      .map(|(end_ts, _)| {
+        let diff = wrapped_diff(end_ts, start_timestamp);
+        if diff > 0 {
+          diff as Clock
+        } else {
+          0
+        }
+      })
+      .unwrap_or(0)
+      .try_into()
+      .unwrap()
   }
-  pub fn get_samples(&mut self, start_timestamp: Clock, channel_index: usize, buffer: &mut [Sample]) -> bool {
+  pub fn get_samples(
+    &mut self,
+    start_timestamp: Clock,
+    channel_index: usize,
+    buffer: &mut [Sample],
+  ) -> bool {
     let chrecv = &mut self.channels[channel_index];
     chrecv.update();
     if let Some(ch) = chrecv.get_mut() {
-      let start_timestamp = start_timestamp.wrapping_sub(ch.latency_samples).wrapping_sub(buffer.len() as Clock);
+      let start_timestamp =
+        start_timestamp.wrapping_sub(ch.latency_samples).wrapping_sub(buffer.len() as Clock);
       ch.read_samples_from_ringbuffer(start_timestamp, buffer)
     } else {
       buffer.fill(0);
@@ -110,7 +143,6 @@ impl<P: ProxyToSamplesBuffer> RealTimeSamplesReceiver<P> {
     &self.clock
   }
 }
-
 
 enum Command<P: ProxyToSamplesBuffer> {
   NoOp,
@@ -139,17 +171,17 @@ impl<P: ProxyToSamplesBuffer> ToRealTime<P> {
   async fn handle_command(&mut self, command_opt: Option<Command<P>>) -> bool {
     let command = command_opt.unwrap_or(Command::Shutdown);
     match command {
-      Command::ConnectChannel{channel_index, source, latency_samples } => {
+      Command::ConnectChannel { channel_index, source, latency_samples } => {
         debug!("connecting channel index={channel_index}");
         self.senders[channel_index].send(Box::new(Some(Channel {
-          id: channel_index+1,
+          id: channel_index + 1,
           source,
           prev_holes_count: 0,
           latency_samples: latency_samples.try_into().unwrap(),
-          was_connected: false
+          was_connected: false,
         })));
       }
-      Command::DisconnectChannel{channel_index} => {
+      Command::DisconnectChannel { channel_index } => {
         debug!("disconnecting channel index={channel_index}");
         self.senders[channel_index].send(Box::new(None));
       }
@@ -162,15 +194,15 @@ impl<P: ProxyToSamplesBuffer> ToRealTime<P> {
   }
 }
 
-
-
 struct PeriodicSamplesCollector<P: ProxyToSamplesBuffer> {
   commands_receiver: mpsc::Receiver<Command<P>>,
   channels: Vec<Option<Channel<P>>>,
   callback: SamplesCallback,
 }
 
-fn get_min_max_end_timestamps<'a, P: ProxyToSamplesBuffer + 'a>(channels: impl IntoIterator<Item = &'a Option<Channel<P>>>) -> Option<(Clock, Clock)> {
+fn get_min_max_end_timestamps<'a, P: ProxyToSamplesBuffer + 'a>(
+  channels: impl IntoIterator<Item = &'a Option<Channel<P>>>,
+) -> Option<(Clock, Clock)> {
   let clocks = channels
     .into_iter()
     .filter_map(|opt| opt.as_ref())
@@ -178,7 +210,7 @@ fn get_min_max_end_timestamps<'a, P: ProxyToSamplesBuffer + 'a>(channels: impl I
     .collect_vec();
   Some((
     clocks.iter().min_by(|&&a, &&b| wrapped_diff(a, b).cmp(&0))?.to_owned().try_into().unwrap(),
-    clocks.iter().max_by(|&&a, &&b| wrapped_diff(a, b).cmp(&0))?.to_owned().try_into().unwrap()
+    clocks.iter().max_by(|&&a, &&b| wrapped_diff(a, b).cmp(&0))?.to_owned().try_into().unwrap(),
   ))
 }
 
@@ -272,11 +304,17 @@ impl<P: ProxyToSamplesBuffer> PeriodicSamplesCollector<P> {
   async fn handle_command(&mut self, command_opt: Option<Command<P>>) -> bool {
     let command = command_opt.unwrap_or(Command::Shutdown);
     match command {
-      Command::ConnectChannel{channel_index, source, latency_samples } => {
+      Command::ConnectChannel { channel_index, source, latency_samples } => {
         debug!("connecting channel index={channel_index}");
-        self.channels[channel_index] = Some(Channel { id: channel_index+1, source, prev_holes_count: 0, latency_samples: latency_samples.try_into().unwrap(), was_connected: false });
+        self.channels[channel_index] = Some(Channel {
+          id: channel_index + 1,
+          source,
+          prev_holes_count: 0,
+          latency_samples: latency_samples.try_into().unwrap(),
+          was_connected: false,
+        });
       }
-      Command::DisconnectChannel{channel_index} => {
+      Command::DisconnectChannel { channel_index } => {
         debug!("disconnecting channel index={channel_index}");
         self.channels[channel_index] = None;
       }
@@ -288,7 +326,6 @@ impl<P: ProxyToSamplesBuffer> PeriodicSamplesCollector<P> {
     return true;
   }
 }
-
 
 pub struct SamplesCollector<P: ProxyToSamplesBuffer> {
   commands_sender: mpsc::Sender<Command<P>>,
@@ -308,29 +345,33 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static> SamplesCollector<P> {
     return (Self { commands_sender: tx }, async move { internal.run().await }.boxed());
   }
 
-  pub fn new_realtime(self_info: Arc<DeviceInfo>, clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>) -> (Self, Pin<Box<dyn Future<Output = ()> + Send + 'static>>, RealTimeSamplesReceiver<P>) {
+  pub fn new_realtime(
+    self_info: Arc<DeviceInfo>,
+    clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
+  ) -> (Self, Pin<Box<dyn Future<Output = ()> + Send + 'static>>, RealTimeSamplesReceiver<P>) {
     let (tx, rx) = mpsc::channel(100);
-    let (senders, receivers) = (0..self_info.rx_channels.len()).map(|chi| {
-      real_time_box_channel::channel(Box::new(None))
-    }).unzip();
+    let (senders, receivers) =
+      (0..self_info.rx_channels.len()).map(|chi| real_time_box_channel::channel(Box::new(None))).unzip();
 
-    let mut internal = ToRealTime {
-      commands_receiver: rx,
-      senders,
-    };
-    
-    (Self {commands_sender: tx}, async move { internal.run().await }.boxed(), RealTimeSamplesReceiver {
-      channels: receivers,
-      clock: MediaClock::new(),
-      clock_recv
-    })
+    let mut internal = ToRealTime { commands_receiver: rx, senders };
+
+    (
+      Self { commands_sender: tx },
+      async move { internal.run().await }.boxed(),
+      RealTimeSamplesReceiver { channels: receivers, clock: MediaClock::new(), clock_recv },
+    )
   }
 
   /* pub fn new_external(self_info: Arc<DeviceInfo>, external_channels: impl IntoIterator<Item = ExternalBufferParameters<Sample>>) -> (Self, Pin<Box<dyn Future<Output = ()> + Send + 'static>>) {
-    
+
   } */
 
-  pub async fn connect_channel(&self, channel_index: usize, source: RBOutput<Sample, P>, latency_samples: usize) {
+  pub async fn connect_channel(
+    &self,
+    channel_index: usize,
+    source: RBOutput<Sample, P>,
+    latency_samples: usize,
+  ) {
     self
       .commands_sender
       .send(Command::ConnectChannel { channel_index, source, latency_samples })

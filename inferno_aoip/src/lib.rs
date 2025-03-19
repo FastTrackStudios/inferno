@@ -1,51 +1,50 @@
 // Inferno-AoIP
 // Copyright (C) 2023-2025 Teodor Woźniak
-// 
+//
 // You may choose which license to use from the two following.
 // Remove the other license if desirable
 // (e.g. forking into a project that will benefit from AGPL protection)
-// 
+//
 // 1.
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
-// 
+//
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
-// 
+//
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
-// 
+//
 // 2.
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
-// 
+//
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU Affero General Public License for more details.
-// 
+//
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-
 //! Inferno - unofficial implemention of the Dante protocol (Audio over IP)
-//! 
+//!
 //! Currently this library emulates a Dante device with receive channels,
 //! which can be connected to transmitters using Dante Controller (official,
 //! proprietary closed source) or
 //! `[network-audio-controller](https://github.com/chris-ritsen/network-audio-controller)`
 //! (unofficial, open source)
-//! 
+//!
 //! For example, this will show peak levels of incoming audio samples:
 //! ```
 //! use inferno_aoip::{Sample, DeviceInfo, DeviceServer, SelfInfoBuilder};
-//! 
+//!
 //! fn audio_callback(samples_count: usize, channels: &Vec<Vec<Sample>>) {
 //!   let line = channels.iter().map(|ch| {
 //!     let peak = (ch.iter().take(samples_count).map(|samp|
@@ -60,7 +59,7 @@
 //!   }).collect::<String>();
 //!   println!("{line}");
 //! }
-//! 
+//!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() {
 //!   // TODO: update line below with Settings
@@ -71,8 +70,7 @@
 //!   server.shutdown().await;
 //! }
 //! ```
-//! 
-
+//!
 
 mod arc_server;
 mod byte_utils;
@@ -100,7 +98,7 @@ mod settings;
 mod state_storage;
 mod thread_utils;
 
-pub use common::{Sample, Clock, ClockDiff};
+pub use common::{Clock, ClockDiff, Sample};
 pub use device_info::*;
 pub use device_server::DeviceServer;
 pub use media_clock::{MediaClock, RealTimeClockReceiver};
@@ -109,7 +107,7 @@ pub use settings::Settings;
 pub type AtomicSample = atomic::Atomic<Sample>;
 
 pub mod utils {
+  pub use crate::common::LogAndForget;
   pub use crate::os_utils::set_current_thread_realtime;
   pub use crate::thread_utils::run_future_in_new_thread;
-  pub use crate::common::LogAndForget;
 }

@@ -1,9 +1,9 @@
+use clap::Parser;
+use log::{error, info};
 use std::io::Write;
 use std::{env, fs::File, mem::size_of};
-use log::{info, error};
-use clap::Parser;
 
-use inferno_aoip::{Sample, DeviceServer, Settings};
+use inferno_aoip::{DeviceServer, Sample, Settings};
 
 const ABOUT: &str = "Inferno2pipe
 Copyright (C) 2023-2025 Teodor Wozniak
@@ -33,45 +33,47 @@ If not, see <http://www.gnu.org/licenses/>.
 #[derive(Parser, Debug)]
 #[command(author, version, about = ABOUT, long_about = None, arg_required_else_help = true)]
 struct Args {
-  #[arg(long, short)]
-  channels_count: usize,
-  #[arg(long, short)]
-  output: String,
+    #[arg(long, short)]
+    channels_count: usize,
+    #[arg(long, short)]
+    output: String,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-  let logenv = env_logger::Env::default().default_filter_or("debug");
-  env_logger::init_from_env(logenv);
+    let logenv = env_logger::Env::default().default_filter_or("debug");
+    env_logger::init_from_env(logenv);
 
-  let args = Args::parse();
-  let ch_count = args.channels_count;
+    let args = Args::parse();
+    let ch_count = args.channels_count;
 
-  let mut settings = Settings::new("Inferno2pipe", "Inferno2pipe", None, &Default::default());
-  settings.make_rx_channels(ch_count);
+    let mut settings = Settings::new("Inferno2pipe", "Inferno2pipe", None, &Default::default());
+    settings.make_rx_channels(ch_count);
 
-  let mut output_file = File::create(args.output).unwrap();
-  let mut buffer: Vec<u8> =
-    vec![0; ch_count * (settings.self_info.sample_rate as usize) * size_of::<Sample>() / 10];
-  let write_callback = move |samples_count, channels: &Vec<Vec<Sample>>| {
-    let stride = channels.len() * size_of::<Sample>();
-    let len = stride * samples_count;
-    if len > buffer.len() {
-      buffer.resize(len, 0);
-      info!("enlarging write buffer to {len}");
-    }
-    for (chi, ch) in channels.iter().enumerate() {
-      let mut bi = chi * size_of::<Sample>();
-      for si in 0..samples_count {
-        buffer[bi..bi + size_of::<Sample>()].copy_from_slice(&ch[si].to_ne_bytes());
-        bi += stride;
-      }
-    }
-    output_file.write_all(&buffer[..len]).unwrap_or_else(|e| error!("error writing output: {e:?}"));
-  };
+    let mut output_file = File::create(args.output).unwrap();
+    let mut buffer: Vec<u8> =
+        vec![0; ch_count * (settings.self_info.sample_rate as usize) * size_of::<Sample>() / 10];
+    let write_callback = move |samples_count, channels: &Vec<Vec<Sample>>| {
+        let stride = channels.len() * size_of::<Sample>();
+        let len = stride * samples_count;
+        if len > buffer.len() {
+            buffer.resize(len, 0);
+            info!("enlarging write buffer to {len}");
+        }
+        for (chi, ch) in channels.iter().enumerate() {
+            let mut bi = chi * size_of::<Sample>();
+            for si in 0..samples_count {
+                buffer[bi..bi + size_of::<Sample>()].copy_from_slice(&ch[si].to_ne_bytes());
+                bi += stride;
+            }
+        }
+        output_file
+            .write_all(&buffer[..len])
+            .unwrap_or_else(|e| error!("error writing output: {e:?}"));
+    };
 
-  let mut server = DeviceServer::start(settings).await;
-  server.receive_with_callback(Box::new(write_callback)).await;
-  let _ = tokio::signal::ctrl_c().await;
-  server.shutdown().await;
+    let mut server = DeviceServer::start(settings).await;
+    server.receive_with_callback(Box::new(write_callback)).await;
+    let _ = tokio::signal::ctrl_c().await;
+    server.shutdown().await;
 }

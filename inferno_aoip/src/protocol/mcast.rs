@@ -1,7 +1,7 @@
 use binary_layout::prelude::*;
 
-use crate::common::*;
 use crate::byte_utils::*;
+use crate::common::*;
 use crate::info_mcast_server::MulticastMessage;
 
 pub const HEADER_LENGTH: usize = 32;
@@ -43,13 +43,15 @@ pub fn make_packet<'a>(
   return view.into_storage();
 }
 
-pub fn make_channel_change_notification(channel_indices: impl IntoIterator<Item = usize>) -> MulticastMessage {
+pub fn make_channel_change_notification(
+  channel_indices: impl IntoIterator<Item = usize>,
+) -> MulticastMessage {
   let mut content = vec![0u8; 3];
   let offset = 2;
   for ch in channel_indices {
-    let byte = ch/8;
+    let byte = ch / 8;
     let bit = ch % 8;
-    if byte >= (content.len()-offset) {
+    if byte >= (content.len() - offset) {
       content.resize(byte + offset + 1, 0);
     }
     content[byte + offset] |= 1 << bit;
@@ -57,9 +59,5 @@ pub fn make_channel_change_notification(channel_indices: impl IntoIterator<Item 
   let mask_len = (content.len() - 2).try_into().unwrap();
   content[0] = H(mask_len);
   content[1] = L(mask_len);
-  MulticastMessage {
-    start_code: 0xffff,
-    opcode: [0x07, 0x2a, 1, 2, 0, 0, 0, 0],
-    content,
-  }
+  MulticastMessage { start_code: 0xffff, opcode: [0x07, 0x2a, 1, 2, 0, 0, 0, 0], content }
 }

@@ -2,26 +2,31 @@ extern crate alsa_sys_all;
 extern crate libc;
 use alsa_sys_all::*;
 
+use core::slice;
 use futures_util::FutureExt;
 use inferno_aoip::utils::{run_future_in_new_thread, LogAndForget};
-use inferno_aoip::{AtomicSample, Clock, ClockDiff, DeviceId, DeviceInfo, DeviceServer, ExternalBufferParameters, MediaClock, PositionReportDestination, RealTimeClockReceiver, Sample, Settings};
+use inferno_aoip::{
+    AtomicSample, Clock, ClockDiff, DeviceId, DeviceInfo, DeviceServer, ExternalBufferParameters,
+    MediaClock, PositionReportDestination, RealTimeClockReceiver, Sample, Settings,
+};
+use itertools::Itertools;
 use lazy_static::lazy_static;
-use libc::{c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN};
+use libc::{
+    c_char, c_int, c_uint, c_void, eventfd, free, malloc, EBUSY, EFD_CLOEXEC, EPIPE, POLLIN,
+};
 use log::{debug, error};
-use tokio::sync::{mpsc, oneshot};
-use core::slice;
 use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::ffi::CStr;
-use std::num::Wrapping;
-use std::ptr::{null_mut, null};
 use std::mem::zeroed;
+use std::num::Wrapping;
+use std::ptr::{null, null_mut};
 use std::sync::atomic::{self, AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{sleep, JoinHandle};
 use std::time::{Duration, Instant};
-use itertools::Itertools;
+use tokio::sync::{mpsc, oneshot};
 
 struct StartArgs {
     channels: Vec<ExternalBufferParameters<Sample>>,
@@ -49,75 +54,108 @@ struct InfernoInstance {
 const PLUGIN_NAME: [u8; 23] = *b"Inferno virtual device\0";
 
 lazy_static! {
-    static ref global_instances: RwLock<BTreeMap<DeviceId, Arc<Mutex<InfernoInstance>>>> = RwLock::new(BTreeMap::new());
+    static ref global_instances: RwLock<BTreeMap<DeviceId, Arc<Mutex<InfernoInstance>>>> =
+        RwLock::new(BTreeMap::new());
     static ref global_initialized: Mutex<bool> = false.into();
 }
 
 fn get_or_create_instance(settings: &Settings) -> Arc<Mutex<InfernoInstance>> {
     let mut instances_locked = global_instances.write().unwrap();
     let entry = instances_locked.entry(settings.self_info.factory_device_id);
-    entry.or_insert_with(|| {
-        
-        //self_info.sample_rate = sample_rate;
-        // TODO make tx & rx channels based on (*io).channels
-        // this requires a complicated refactor to allow adding channels to the Dante network dynamically at any time, not just on DeviceServer start
-        // because we don't know beforehand whether the app will be capture&playback, playback-only or capture-only
-        // so we don't know whether we should wait for the second prepare call to gather all channels counts
+    entry
+        .or_insert_with(|| {
+            //self_info.sample_rate = sample_rate;
+            // TODO make tx & rx channels based on (*io).channels
+            // this requires a complicated refactor to allow adding channels to the Dante network dynamically at any time, not just on DeviceServer start
+            // because we don't know beforehand whether the app will be capture&playback, playback-only or capture-only
+            // so we don't know whether we should wait for the second prepare call to gather all channels counts
 
-        //assert_eq!(self_info.sample_rate, sample_rate);
+            //assert_eq!(self_info.sample_rate, sample_rate);
 
-        let (commands_sender, mut commands_rx) = mpsc::channel(16);
+            let (commands_sender, mut commands_rx) = mpsc::channel(16);
 
-        let settings = settings.clone();
-        let thread = run_future_in_new_thread("Inferno main", move || async move {
-            // TODO DeviceServer::start may fail internally (e.g. if other process using Inferno is already listening on network ports)
-            // retrying infinitely will spam the log. (Audacity behaves this way if Inferno is already running)
-            let mut device_server = DeviceServer::start(settings).await;
-            loop {
-                match commands_rx.recv().await {
-                    Some(command) => match command {
-                        Command::StartReceiver(StartArgs{channels, start_time_rx, clock_rx_tx, current_timestamp, on_transfer}) => {
-                            clock_rx_tx.send(device_server.get_realtime_clock_receiver());
-                            device_server.receive_to_external_buffer(channels, start_time_rx, current_timestamp, on_transfer).await;
-                            println!("started receiver");
-                        },
-                        Command::StartTransmitter(StartArgs{channels, start_time_rx, clock_rx_tx, current_timestamp, on_transfer}) => {
-                            clock_rx_tx.send(device_server.get_realtime_clock_receiver());
-                            device_server.transmit_from_external_buffer(channels, start_time_rx, current_timestamp, on_transfer).await;
-                            println!("started transmitter");
-                        },
-                        Command::StopReceiver => {
-                            device_server.stop_receiver().await;
-                            println!("stopped receiver");
-                        },
-                        Command::StopTransmitter => {
-                            device_server.stop_transmitter().await;
-                            println!("stopped transmitter");
+            let settings = settings.clone();
+            let thread = run_future_in_new_thread("Inferno main", move || {
+                async move {
+                    // TODO DeviceServer::start may fail internally (e.g. if other process using Inferno is already listening on network ports)
+                    // retrying infinitely will spam the log. (Audacity behaves this way if Inferno is already running)
+                    let mut device_server = DeviceServer::start(settings).await;
+                    loop {
+                        match commands_rx.recv().await {
+                            Some(command) => match command {
+                                Command::StartReceiver(StartArgs {
+                                    channels,
+                                    start_time_rx,
+                                    clock_rx_tx,
+                                    current_timestamp,
+                                    on_transfer,
+                                }) => {
+                                    clock_rx_tx.send(device_server.get_realtime_clock_receiver());
+                                    device_server
+                                        .receive_to_external_buffer(
+                                            channels,
+                                            start_time_rx,
+                                            current_timestamp,
+                                            on_transfer,
+                                        )
+                                        .await;
+                                    println!("started receiver");
+                                }
+                                Command::StartTransmitter(StartArgs {
+                                    channels,
+                                    start_time_rx,
+                                    clock_rx_tx,
+                                    current_timestamp,
+                                    on_transfer,
+                                }) => {
+                                    clock_rx_tx.send(device_server.get_realtime_clock_receiver());
+                                    device_server
+                                        .transmit_from_external_buffer(
+                                            channels,
+                                            start_time_rx,
+                                            current_timestamp,
+                                            on_transfer,
+                                        )
+                                        .await;
+                                    println!("started transmitter");
+                                }
+                                Command::StopReceiver => {
+                                    device_server.stop_receiver().await;
+                                    println!("stopped receiver");
+                                }
+                                Command::StopTransmitter => {
+                                    device_server.stop_transmitter().await;
+                                    println!("stopped transmitter");
+                                }
+                                Command::Shutdown => {
+                                    break;
+                                }
+                            },
+                            None => {
+                                break;
+                            }
                         }
-                        Command::Shutdown => {
-                            break;
-                        }
-                    },
-                    None => {
-                        break;
                     }
+                    device_server.shutdown().await;
                 }
-            }
-            device_server.shutdown().await;
-        }.boxed_local());
+                .boxed_local()
+            });
 
-        Arc::new(Mutex::new(InfernoInstance {
-            commands_sender,
-            thread,
-            capturing: false.into(),
-            playing: false.into(),
-        }))
-    }).clone()
+            Arc::new(Mutex::new(InfernoInstance {
+                commands_sender,
+                thread,
+                capturing: false.into(),
+                playing: false.into(),
+            }))
+        })
+        .clone()
 }
 
 fn get_instance(settings: &Settings) -> Option<Arc<Mutex<InfernoInstance>>> {
     let instances_locked = global_instances.read().unwrap();
-    instances_locked.get(&settings.self_info.factory_device_id).map(|a|a.clone())
+    instances_locked
+        .get(&settings.self_info.factory_device_id)
+        .map(|a| a.clone())
 }
 
 struct StreamInfo {
@@ -153,7 +191,9 @@ unsafe fn get_private<'a>(io: *mut snd_pcm_ioplug_t) -> &'a mut MyIOPlug {
 
 unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframes_t {
     let this = get_private(io);
-    let cur = this.current_timestamp.load(Ordering::SeqCst /*TODO: really needed?*/);
+    let cur = this
+        .current_timestamp
+        .load(Ordering::SeqCst /*TODO: really needed?*/);
 
     // TODO may be non-monotonic in edge cases (switching between clocks)
     // TODO rethink int sizes here
@@ -185,7 +225,8 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
             }
         }
         if now_samples_opt.is_some() && this.start_time.is_some() {
-            (now_samples_opt.unwrap() as usize).wrapping_sub(this.start_time.unwrap()) as snd_pcm_sframes_t
+            (now_samples_opt.unwrap() as usize).wrapping_sub(this.start_time.unwrap())
+                as snd_pcm_sframes_t
         } else {
             //log::debug!("clock not ready... {} {}", now_samples_opt.is_some(), this.start_time.is_some());
             0
@@ -193,9 +234,16 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         //now_samples_opt.map(|now_samples| now_samples.wrapping_sub(this.start_time.unwrap())).unwrap_or(0) as i64
     };
 
-    let boundary: snd_pcm_sframes_t = this.stream_info.as_ref().unwrap().boundary.try_into().unwrap();
-    let max_diff = boundary/4;
-    let appl_ptr = ((*io).appl_ptr as snd_pcm_sframes_t).wrapping_add(this.stream_info.as_ref().unwrap().boundary_add.0);
+    let boundary: snd_pcm_sframes_t = this
+        .stream_info
+        .as_ref()
+        .unwrap()
+        .boundary
+        .try_into()
+        .unwrap();
+    let max_diff = boundary / 4;
+    let appl_ptr = ((*io).appl_ptr as snd_pcm_sframes_t)
+        .wrapping_add(this.stream_info.as_ref().unwrap().boundary_add.0);
     let mut diff = ptr.wrapping_sub(appl_ptr);
     // handle situation when our "hardware" pointer wraps around boundary but the application pointer not yet (or vice versa):
     if diff.saturating_abs() > max_diff {
@@ -212,14 +260,16 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
             }
         }
     }
-    
+
     let (dir, buffered) = match (*io).stream {
         SND_PCM_STREAM_CAPTURE => ("capture", diff),
         SND_PCM_STREAM_PLAYBACK => ("playback", (0 as snd_pcm_sframes_t).wrapping_sub(diff)),
-        _ => ("???", 0)
+        _ => ("???", 0),
     };
 
-    if buffered < 0 && ((*io).state == SND_PCM_STATE_RUNNING || (*io).state == SND_PCM_STATE_DRAINING) {
+    if buffered < 0
+        && ((*io).state == SND_PCM_STATE_RUNNING || (*io).state == SND_PCM_STATE_DRAINING)
+    {
         if let Ok(hw_ptr) = ptr.try_into() {
             let ioplug_avail = snd_pcm_ioplug_avail(io, hw_ptr, (*io).appl_ptr);
             let ioplug_hw_avail = snd_pcm_ioplug_hw_avail(io, hw_ptr, (*io).appl_ptr);
@@ -228,12 +278,12 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
             println!("severe clock discontinuity");
             return (-EPIPE).try_into().unwrap(); // report xrun
         }
-        
+
         return (-EPIPE).try_into().unwrap(); // report xrun
-        // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
-        // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
+                                             // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
+                                             // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
     }
-    
+
     ptr = ptr.wrapping_add(this.stream_info.as_ref().unwrap().boundary_add.0);
     if ptr > boundary {
         this.stream_info.as_mut().unwrap().boundary_add -= boundary;
@@ -245,7 +295,13 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
 }
 
 fn get_app_name() -> Option<String> {
-    Some(std::env::current_exe().ok()?.file_name()?.to_string_lossy().to_string())
+    Some(
+        std::env::current_exe()
+            .ok()?
+            .file_name()?
+            .to_string_lossy()
+            .to_string(),
+    )
 }
 
 unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
@@ -261,7 +317,7 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
 
     let bits_per_sample = (8 * size_of::<Sample>()) as u32;
     let channels_areas = std::slice::from_raw_parts(channels_areas, (*io).channels as usize);
-    if channels_areas.len()>0 {
+    if channels_areas.len() > 0 {
         let area = &channels_areas[0];
         debug!("got buffer size {} samples * {} channels, first channel: address {:x} with first {}b, step {}b", (*io).buffer_size, channels_areas.len(), area.addr as usize, area.first, area.step);
     }
@@ -277,15 +333,20 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     }
     println!("period size: {}", (*io).period_size);
 
-    let channels_buffers = channels_areas.iter().enumerate().map(|(ch_index, area)| {
-        ExternalBufferParameters::<Sample>::new(
-            area.addr.byte_offset((area.first/8) as isize) as *const AtomicSample,
-            ((*io).buffer_size as usize) * channels_areas.len() - ((area.first/bits_per_sample) as usize),
-            (area.step/bits_per_sample) as usize,
-            this.buffers_valid.clone(),
-            None
-        )
-    }).collect();
+    let channels_buffers = channels_areas
+        .iter()
+        .enumerate()
+        .map(|(ch_index, area)| {
+            ExternalBufferParameters::<Sample>::new(
+                area.addr.byte_offset((area.first / 8) as isize) as *const AtomicSample,
+                ((*io).buffer_size as usize) * channels_areas.len()
+                    - ((area.first / bits_per_sample) as usize),
+                (area.step / bits_per_sample) as usize,
+                this.buffers_valid.clone(),
+                None,
+            )
+        })
+        .collect();
 
     let mut swparams = std::ptr::null_mut::<snd_pcm_sw_params_t>();
     let r = snd_pcm_sw_params_malloc(&mut swparams);
@@ -323,25 +384,41 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
             channels: channels_buffers,
             start_time_rx,
             clock_rx_tx,
-            current_timestamp: if this.use_flows_clock { this.current_timestamp.clone() } else { Default::default() },
+            current_timestamp: if this.use_flows_clock {
+                this.current_timestamp.clone()
+            } else {
+                Default::default()
+            },
             on_transfer: Box::new(this.on_transfer.as_ref().clone()),
         };
         let mut err = false;
         match (*io).stream {
             SND_PCM_STREAM_CAPTURE => {
                 if common.capturing {
-                    err = common.commands_sender.blocking_send(Command::StopReceiver).is_err();
+                    err = common
+                        .commands_sender
+                        .blocking_send(Command::StopReceiver)
+                        .is_err();
                 }
                 common.capturing = !err;
-                err |= common.commands_sender.blocking_send(Command::StartReceiver(args)).is_err();
-            },
+                err |= common
+                    .commands_sender
+                    .blocking_send(Command::StartReceiver(args))
+                    .is_err();
+            }
             SND_PCM_STREAM_PLAYBACK => {
                 if common.playing {
-                    err = common.commands_sender.blocking_send(Command::StopTransmitter).is_err();
+                    err = common
+                        .commands_sender
+                        .blocking_send(Command::StopTransmitter)
+                        .is_err();
                 }
                 common.playing = !err;
-                err |= common.commands_sender.blocking_send(Command::StartTransmitter(args)).is_err();
-            },
+                err |= common
+                    .commands_sender
+                    .blocking_send(Command::StartTransmitter(args))
+                    .is_err();
+            }
             _ => {
                 error!("unknown stream direction");
                 return -libc::EINVAL;
@@ -352,7 +429,6 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
             return -libc::EPIPE;
         }
     }
-
 
     this.clock_receiver = match clock_rx_rx.blocking_recv() {
         Ok(clk) => Some(clk),
@@ -385,7 +461,12 @@ unsafe extern "C" fn plugin_start(io: *mut snd_pcm_ioplug_t) -> c_int {
     let now_samples_opt = this.media_clock.now_in_timebase((*io).rate as u64);
     if now_samples_opt.is_some() && this.start_time.is_none() {
         this.start_time = Some(now_samples_opt.unwrap() as usize);
-        if let Err(e) = this.start_time_tx.take().unwrap().send(now_samples_opt.unwrap()) {
+        if let Err(e) = this
+            .start_time_tx
+            .take()
+            .unwrap()
+            .send(now_samples_opt.unwrap())
+        {
             error!("failed to send start timestamp: {e}. tx/rx will not work.");
         }
     }
@@ -397,27 +478,33 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
 
     let this = get_private(io);
     *this.buffers_valid.write().unwrap() = false;
-    
+
     // TODO blocking_send inside mutex, risk of deadlock?
     if let Some(common_mutex) = get_instance(&this.settings) {
         let mut common = common_mutex.lock().unwrap();
         match (*io).stream {
             SND_PCM_STREAM_CAPTURE => {
                 if common.capturing {
-                    common.commands_sender.blocking_send(Command::StopReceiver).unwrap();
+                    common
+                        .commands_sender
+                        .blocking_send(Command::StopReceiver)
+                        .unwrap();
                     common.capturing = false;
                 } else {
                     println!("plugin_stop called more than once for capture stream");
                 }
-            },
+            }
             SND_PCM_STREAM_PLAYBACK => {
                 if common.playing {
-                    common.commands_sender.blocking_send(Command::StopTransmitter).unwrap();
+                    common
+                        .commands_sender
+                        .blocking_send(Command::StopTransmitter)
+                        .unwrap();
                     common.playing = false;
                 } else {
                     println!("plugin_stop called more than once for playback stream");
                 }
-            },
+            }
             _ => {
                 error!("unknown stream direction");
                 return -libc::EINVAL;
@@ -432,7 +519,12 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
     0
 }
 
-unsafe extern "C" fn plugin_capture_transfer(io: *mut snd_pcm_ioplug_t, areas: *const snd_pcm_channel_area_t, offset: snd_pcm_uframes_t, size: snd_pcm_uframes_t) -> snd_pcm_sframes_t {
+unsafe extern "C" fn plugin_capture_transfer(
+    io: *mut snd_pcm_ioplug_t,
+    areas: *const snd_pcm_channel_area_t,
+    offset: snd_pcm_uframes_t,
+    size: snd_pcm_uframes_t,
+) -> snd_pcm_sframes_t {
     //println!("plugin_transfer called, size: {:?}", size);
     size as snd_pcm_sframes_t
 }
@@ -443,7 +535,10 @@ unsafe extern "C" fn plugin_close(io: *mut snd_pcm_ioplug_t) -> c_int {
     {
         let mut instances_locked = global_instances.write().unwrap();
         // TODO blocking_send inside mutex, risk of deadlock?
-        if let Some(common_mutex) = instances_locked.get(&this.settings.self_info.factory_device_id).map(|a|a.clone()) {
+        if let Some(common_mutex) = instances_locked
+            .get(&this.settings.self_info.factory_device_id)
+            .map(|a| a.clone())
+        {
             let common = common_mutex.lock().unwrap();
             if (!common.capturing) && (!common.playing) {
                 if let Err(e) = common.commands_sender.blocking_send(Command::Shutdown) {
@@ -454,18 +549,26 @@ unsafe extern "C" fn plugin_close(io: *mut snd_pcm_ioplug_t) -> c_int {
         }
     }
     libc::close(this.on_transfer_eventfd); // TODO: shouldn't this be in a different place?
-    
+
     0
 }
 
-
-unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_char, root: *const snd_config_t, conf: *const snd_config_t, stream: snd_pcm_stream_t, mode: c_int) -> c_int {
-
+unsafe extern "C" fn plugin_define(
+    pcmp: *mut *mut snd_pcm_t,
+    name: *const c_char,
+    root: *const snd_config_t,
+    conf: *const snd_config_t,
+    stream: snd_pcm_stream_t,
+    mode: c_int,
+) -> c_int {
     {
         let mut locked_flag = global_initialized.lock().unwrap();
         if !*locked_flag {
             let logenv = env_logger::Env::default().default_filter_or("debug");
-            env_logger::builder().parse_env(logenv).format_timestamp_micros().init();
+            env_logger::builder()
+                .parse_env(logenv)
+                .format_timestamp_micros()
+                .init();
             *locked_flag = true;
         }
     }
@@ -478,7 +581,7 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         let r1 = snd_config_get_id(entry, key_container.as_mut_ptr());
         let mut value_container: [*mut c_char; 1] = [core::ptr::null_mut()];
         let r2 = snd_config_get_ascii(entry, value_container.as_mut_ptr());
-        if r1==0 && r2==0 && (!key_container[0].is_null()) && (!value_container[0].is_null()) {
+        if r1 == 0 && r2 == 0 && (!key_container[0].is_null()) && (!value_container[0].is_null()) {
             let key = CStr::from_ptr(key_container[0]).to_str();
             let value = CStr::from_ptr(value_container[0]).to_str();
             if key.is_ok() && value.is_ok() {
@@ -498,14 +601,17 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         close: Some(plugin_close),
         ..zeroed()
     };
-    if stream==SND_PCM_STREAM_CAPTURE {
+    if stream == SND_PCM_STREAM_CAPTURE {
         //callbacks.transfer = Some(plugin_capture_transfer); // TODO
     }
 
     let app_name = get_app_name().unwrap_or(format!("process {}", std::process::id().to_string()));
     let settings = Settings::new(&app_name, &app_name, None, &config);
 
-    let disable_pollfd = config.get("DISABLE_POLLFD").map(|v|v=="1").unwrap_or(false);
+    let disable_pollfd = config
+        .get("DISABLE_POLLFD")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let on_transfer: Box<dyn Fn() + Send + Sync + 'static> = if disable_pollfd {
         Box::new(move || {})
     } else {
@@ -514,7 +620,10 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         })
     };
 
-    let use_flows_clock = config.get("USE_FLOWS_CLOCK").map(|v|v=="1").unwrap_or(false);
+    let use_flows_clock = config
+        .get("USE_FLOWS_CLOCK")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
     let myio = Box::into_raw(Box::new(MyIOPlug {
         io: zeroed(),
@@ -536,7 +645,7 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
     }));
 
     let io = &mut (*myio).io;
-    io.version = (1<<16) | (0<<8) | 2;
+    io.version = (1 << 16) | (0 << 8) | 2;
     io.name = PLUGIN_NAME.as_ptr() as *const _;
     io.callback = &(*myio).callbacks;
     io.flags = SND_PCM_IOPLUG_FLAG_BOUNDARY_WA;
@@ -559,19 +668,38 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         return r;
     }
 
-    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_FORMAT as i32, 1, [SND_PCM_FORMAT_S32 as u32].as_ptr());
+    let r = snd_pcm_ioplug_set_param_list(
+        io,
+        SND_PCM_IOPLUG_HW_FORMAT as i32,
+        1,
+        [SND_PCM_FORMAT_S32 as u32].as_ptr(),
+    );
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_FORMAT returned {r}");
         return r;
     }
 
-    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_ACCESS as i32, 2, [SND_PCM_ACCESS_MMAP_INTERLEAVED as u32, SND_PCM_ACCESS_RW_INTERLEAVED as u32].as_ptr()); // FIXME investigate why planar doesn't work
+    let r = snd_pcm_ioplug_set_param_list(
+        io,
+        SND_PCM_IOPLUG_HW_ACCESS as i32,
+        2,
+        [
+            SND_PCM_ACCESS_MMAP_INTERLEAVED as u32,
+            SND_PCM_ACCESS_RW_INTERLEAVED as u32,
+        ]
+        .as_ptr(),
+    ); // FIXME investigate why planar doesn't work
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_ACCESS returned {r}");
         return r;
     }
 
-    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_RATE as i32, 1, [self_info.sample_rate].as_ptr());
+    let r = snd_pcm_ioplug_set_param_list(
+        io,
+        SND_PCM_IOPLUG_HW_RATE as i32,
+        1,
+        [self_info.sample_rate].as_ptr(),
+    );
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_RATE returned {r}");
         return r;
@@ -586,7 +714,12 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
         }
     } as u32;
 
-    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_CHANNELS as i32, 1, [num_channels].as_ptr());
+    let r = snd_pcm_ioplug_set_param_list(
+        io,
+        SND_PCM_IOPLUG_HW_CHANNELS as i32,
+        1,
+        [num_channels].as_ptr(),
+    );
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_list SND_PCM_IOPLUG_HW_CHANNELS returned {r}");
         return r;
@@ -594,7 +727,7 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 
     let powers_of_2 = |first, max| {
         core::iter::successors(Some(first), move |n| {
-            let r = n*2;
+            let r = n * 2;
             if r > max {
                 None
             } else {
@@ -609,30 +742,51 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
     let max_samples = 65536;
     let bytes_per_sample = size_of::<Sample>() as u32;
 
-    let periods_bytes: Vec<std::os::raw::c_uint> = powers_of_2(min_samples, max_samples/min_periods).map(|n| (num_channels*bytes_per_sample*n) as std::os::raw::c_uint).collect();
+    let periods_bytes: Vec<std::os::raw::c_uint> =
+        powers_of_2(min_samples, max_samples / min_periods)
+            .map(|n| (num_channels * bytes_per_sample * n) as std::os::raw::c_uint)
+            .collect();
     debug!("HW_PERIOD_BYTES: {periods_bytes:?}");
-    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_PERIOD_BYTES as i32, periods_bytes.len() as std::os::raw::c_uint, periods_bytes.as_ptr());
+    let r = snd_pcm_ioplug_set_param_list(
+        io,
+        SND_PCM_IOPLUG_HW_PERIOD_BYTES as i32,
+        periods_bytes.len() as std::os::raw::c_uint,
+        periods_bytes.as_ptr(),
+    );
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIOD_BYTES returned {r}");
         return r;
     }
 
-    let buffer_sizes: Vec<std::os::raw::c_uint> = powers_of_2(min_samples_whole_buffer, max_samples).map(|n| (num_channels*bytes_per_sample*n) as std::os::raw::c_uint).collect();
+    let buffer_sizes: Vec<std::os::raw::c_uint> =
+        powers_of_2(min_samples_whole_buffer, max_samples)
+            .map(|n| (num_channels * bytes_per_sample * n) as std::os::raw::c_uint)
+            .collect();
     debug!("HW_BUFFER_BYTES: {buffer_sizes:?}");
-    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_BUFFER_BYTES as i32, buffer_sizes.len() as std::os::raw::c_uint, buffer_sizes.as_ptr());
+    let r = snd_pcm_ioplug_set_param_list(
+        io,
+        SND_PCM_IOPLUG_HW_BUFFER_BYTES as i32,
+        buffer_sizes.len() as std::os::raw::c_uint,
+        buffer_sizes.as_ptr(),
+    );
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_BUFFER_BYTES returned {r}");
         return r;
     }
 
-    let periods_nums: Vec<std::os::raw::c_uint> = powers_of_2(min_periods, buffer_sizes.last().unwrap()/min_samples).collect();
+    let periods_nums: Vec<std::os::raw::c_uint> =
+        powers_of_2(min_periods, buffer_sizes.last().unwrap() / min_samples).collect();
     debug!("HW_PERIODS: {periods_nums:?}");
-    let r = snd_pcm_ioplug_set_param_list(io, SND_PCM_IOPLUG_HW_PERIODS as i32, periods_nums.len() as std::os::raw::c_uint, periods_nums.as_ptr());
+    let r = snd_pcm_ioplug_set_param_list(
+        io,
+        SND_PCM_IOPLUG_HW_PERIODS as i32,
+        periods_nums.len() as std::os::raw::c_uint,
+        periods_nums.as_ptr(),
+    );
     if r < 0 {
         error!("snd_pcm_ioplug_set_param_minmax SND_PCM_IOPLUG_HW_PERIODS returned {r}");
         return r;
     }
-
 
     *pcmp = (*myio).io.pcm;
 
@@ -641,10 +795,16 @@ unsafe extern "C" fn plugin_define(pcmp: *mut *mut snd_pcm_t, name: *const c_cha
 }
 
 #[no_mangle]
-pub extern "C" fn _snd_pcm_inferno_open(pcmp: *mut *mut snd_pcm_t, name: *const c_char, root: *const snd_config_t, conf: *const snd_config_t, stream: snd_pcm_stream_t, mode: c_int) -> c_int {
+pub extern "C" fn _snd_pcm_inferno_open(
+    pcmp: *mut *mut snd_pcm_t,
+    name: *const c_char,
+    root: *const snd_config_t,
+    conf: *const snd_config_t,
+    stream: snd_pcm_stream_t,
+    mode: c_int,
+) -> c_int {
     unsafe { plugin_define(pcmp, name, root, conf, stream, mode) }
 }
 
 #[no_mangle]
-pub extern "C" fn __snd_pcm_inferno_open_dlsym_pcm_001() {
-}
+pub extern "C" fn __snd_pcm_inferno_open_dlsym_pcm_001() {}

@@ -1,22 +1,27 @@
-use std::{error::Error, fs::{create_dir_all, File}, io::{Read, Write}, path::MAIN_SEPARATOR_STR, sync::Arc};
+use std::{
+  error::Error,
+  fs::{create_dir_all, File},
+  io::{Read, Write},
+  path::MAIN_SEPARATOR_STR,
+  sync::Arc,
+};
 
 use crate::{common::*, device_info, DeviceInfo};
-use serde::{Serialize, Deserialize};
-use toml;
 use platform_dirs::AppDirs;
+use serde::{Deserialize, Serialize};
+use toml;
 
 const PATH_SUFFIX: &str = ".toml";
 
 pub struct StateStorage {
-  path_prefix: String
+  path_prefix: String,
 }
 
 impl StateStorage {
   pub fn new(self_info: &DeviceInfo) -> Self {
-    let dir = AppDirs::new(Some("inferno_aoip"), false).unwrap().
-      state_dir.to_str().unwrap().to_owned() +
-      MAIN_SEPARATOR_STR +
-      &hex::encode(self_info.factory_device_id);
+    let dir = AppDirs::new(Some("inferno_aoip"), false).unwrap().state_dir.to_str().unwrap().to_owned()
+      + MAIN_SEPARATOR_STR
+      + &hex::encode(self_info.factory_device_id);
     create_dir_all(&dir).log_and_forget();
     info!("using state directory: {dir}");
     Self { path_prefix: dir + MAIN_SEPARATOR_STR }
@@ -41,7 +46,6 @@ impl StateStorage {
   }
 }
 
-
 #[derive(Deserialize, Serialize, Default)]
 pub struct ChannelSettings {
   id: usize,
@@ -50,7 +54,7 @@ pub struct ChannelSettings {
 
 #[derive(Deserialize, Serialize)]
 struct SavedChannels {
-  channels: Vec<ChannelSettings>
+  channels: Vec<ChannelSettings>,
 }
 
 pub struct SavedChannelsSettings {
@@ -63,8 +67,8 @@ pub struct SavedChannelsSettings {
 impl SavedChannelsSettings {
   pub fn load(state_storage: Arc<StateStorage>, self_info: Arc<DeviceInfo>) -> Self {
     let mut r = Self {
-      rx_channels: state_storage.load("rx_channels").unwrap_or(SavedChannels{channels:vec![]}),
-      tx_channels: state_storage.load("tx_channels").unwrap_or(SavedChannels{channels:vec![]}),
+      rx_channels: state_storage.load("rx_channels").unwrap_or(SavedChannels { channels: vec![] }),
+      tx_channels: state_storage.load("tx_channels").unwrap_or(SavedChannels { channels: vec![] }),
       state_storage,
       self_info,
     };
@@ -74,20 +78,25 @@ impl SavedChannelsSettings {
   }
   fn load_and_init(src: &mut Vec<ChannelSettings>, dst: &Vec<device_info::Channel>) {
     for (index, cs) in src.iter().enumerate().take(dst.len()) {
-      if cs.id==0 || cs.friendly_name.is_empty() {
+      if cs.id == 0 || cs.friendly_name.is_empty() {
         continue;
       }
-      if index != (cs.id-1) {
+      if index != (cs.id - 1) {
         error!("corrupted saved channels: id {}", cs.id);
         continue;
       }
       *dst[index].friendly_name.write().unwrap() = cs.friendly_name.clone();
     }
-    if dst.len()>src.len() {
-      src.resize_with(dst.len(), ||Default::default());
+    if dst.len() > src.len() {
+      src.resize_with(dst.len(), || Default::default());
     };
   }
-  fn rename(local: &mut Vec<ChannelSettings>, device_channels: &Vec<device_info::Channel>, index: usize, name: String) {
+  fn rename(
+    local: &mut Vec<ChannelSettings>,
+    device_channels: &Vec<device_info::Channel>,
+    index: usize,
+    name: String,
+  ) {
     local[index].friendly_name = name.clone();
     local[index].id = index + 1;
     *device_channels[index].friendly_name.write().unwrap() = name;

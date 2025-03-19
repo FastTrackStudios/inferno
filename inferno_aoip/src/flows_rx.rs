@@ -1,11 +1,11 @@
-use crate::real_time_box_channel::RealTimeBoxReceiver;
-use crate::{common::*, MediaClock};
 use crate::device_info::DeviceInfo;
 use crate::net_utils::MTU;
 use crate::os_utils::set_current_thread_realtime;
-use crate::samples_utils::*;
+use crate::real_time_box_channel::RealTimeBoxReceiver;
 use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RingBufferShared};
+use crate::samples_utils::*;
 use crate::thread_utils::run_future_in_new_thread;
+use crate::{common::*, MediaClock};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind::WouldBlock;
@@ -64,10 +64,23 @@ struct SilenceWriter<P: ProxyToSamplesBuffer> {
 enum Command<P: ProxyToSamplesBuffer> {
   NoOp,
   Shutdown,
-  AddSocket { index: usize, socket: SocketData<P> },
-  RemoveSocket { index: usize },
-  ConnectChannel { socket_index: usize, channel_in_flow: usize, sink: RBInput<Sample, P> },
-  DisconnectChannel { socket_index: usize, channel_in_flow: usize, rb_shared: Arc<RingBufferShared<Sample, P>> },
+  AddSocket {
+    index: usize,
+    socket: SocketData<P>,
+  },
+  RemoveSocket {
+    index: usize,
+  },
+  ConnectChannel {
+    socket_index: usize,
+    channel_in_flow: usize,
+    sink: RBInput<Sample, P>,
+  },
+  DisconnectChannel {
+    socket_index: usize,
+    channel_in_flow: usize,
+    rb_shared: Arc<RingBufferShared<Sample, P>>,
+  },
 }
 
 struct FlowsReceiverInternal<P: ProxyToSamplesBuffer> {
@@ -85,7 +98,13 @@ struct FlowsReceiverInternal<P: ProxyToSamplesBuffer> {
 
 impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
   #[inline(always)]
-  fn receive(sd: &mut SocketData<P>, sample_rate: u32, clock: &mut MediaClock, ref_instant: Instant, write: bool) -> Command<P> {
+  fn receive(
+    sd: &mut SocketData<P>,
+    sample_rate: u32,
+    clock: &mut MediaClock,
+    ref_instant: Instant,
+    write: bool,
+  ) -> Command<P> {
     let mut buf = [0; MTU];
     loop {
       match sd.socket.recv_from(&mut buf) {
@@ -95,8 +114,9 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             return Command::NoOp;
           }
           let timestamp = (u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize)
-          .wrapping_mul(sample_rate as usize)
-          .wrapping_add(u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]) as usize) as Clock;
+            .wrapping_mul(sample_rate as usize)
+            .wrapping_add(u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]) as usize)
+            as Clock;
           // TODO: add timestamp sanity checks with PTP clock
 
           // TODO: optimize, fetching the hardware clock so often is suboptimal
@@ -109,7 +129,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           if write {
             let num_channels = sd.channels.len();
             sd.last_packet_time.store(ref_instant.elapsed().as_secs() as _, Ordering::Relaxed);
-            
+
             let _total_num_samples = (recv_size - 9) / sd.bytes_per_sample;
             //let audio_bytes = &buf[9..9+total_num_samples*sd.bytes_per_sample];
             let audio_bytes = &buf[9..recv_size];
@@ -150,7 +170,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           break;
         }
       }
-    };
+    }
     return Command::NoOp;
   }
   async fn take_command(receiver: &mut mpsc::Receiver<Command<P>>) -> Command<P> {
@@ -161,13 +181,14 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
     let mut next_keepalive = Instant::now() + keepalive_interval_between_flows;
     let mut keepalive_index = 0usize;
     let mut next_closing_samples = Instant::now() + CLOSING_SAMPLES_INTERVAL;
-    let mut events = mio::Events::with_capacity(MAX_FLOWS+1); // +1 because of waker, TODO: really necessary?
+    let mut events = mio::Events::with_capacity(MAX_FLOWS + 1); // +1 because of waker, TODO: really necessary?
     let mut may_have_command = false;
     let mut start_timestamp = None;
 
     set_current_thread_realtime(80);
     loop {
-      let write_to_rbs = self.sockets.iter().find(|opt|opt.is_some()).is_some() || self.silence_writers.len() > 0;
+      let write_to_rbs =
+        self.sockets.iter().find(|opt| opt.is_some()).is_some() || self.silence_writers.len() > 0;
       let timeout = if may_have_command || write_to_rbs {
         Some(CLOSING_SAMPLES_INTERVAL)
       } else {
@@ -197,15 +218,17 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                   if let Some(socket_data) = socket_opt {
                     for channel_opt in &mut socket_data.channels {
                       if let Some(channel) = channel_opt {
-                        channel.timestamp_shift = (0 as ClockDiff).wrapping_sub_unsigned(start_time).wrapping_add_unsigned(channel.latency_samples.try_into().unwrap()) as ClockDiff;
+                        channel.timestamp_shift = (0 as ClockDiff)
+                          .wrapping_sub_unsigned(start_time)
+                          .wrapping_add_unsigned(channel.latency_samples.try_into().unwrap())
+                          as ClockDiff;
                         // FIXME DRY
                       }
                     }
                   }
                 }
-              },
-              Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-              },
+              }
+              Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
               Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                 panic!("channel closed, unable to get start timestamp for ring buffer input");
               }
@@ -218,7 +241,13 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           if let Some(socket_data) = &mut self.sockets[socket_index] {
             // always run receive to prevent network queue fill when waiting for start_time_rx
             // because network queue is harmful when working at realtime priority
-            Self::receive(socket_data, self.sample_rate, &mut self.clock, self.ref_instant, start_time_rx.is_none());
+            Self::receive(
+              socket_data,
+              self.sample_rate,
+              &mut self.clock,
+              self.ref_instant,
+              start_time_rx.is_none(),
+            );
           } else {
             warn!("got token not bound to any existing socket");
           }
@@ -227,7 +256,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
       if start_time_rx.is_none() {
         self.on_transfer.as_ref().map(|cb| cb());
       }
-      
+
       if may_have_command {
         match self.commands_receiver.try_recv() {
           Ok(command) => match command {
@@ -235,7 +264,11 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             // MAYBE TODO: register/deregister appear to be thread safe so maybe they could be moved to non-real-time thread?
             Command::AddSocket { index, mut socket } => {
               debug!("adding socket");
-              self.poll.registry().register(&mut socket.socket, mio::Token(index), mio::Interest::READABLE).unwrap();
+              self
+                .poll
+                .registry()
+                .register(&mut socket.socket, mio::Token(index), mio::Interest::READABLE)
+                .unwrap();
               let previous = std::mem::replace(&mut self.sockets[index], Some(socket));
               debug_assert!(previous.is_none());
             }
@@ -243,17 +276,25 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
               self.poll.registry().deregister(&mut self.sockets[index].as_mut().unwrap().socket).unwrap();
               let socket = self.sockets[index].take().unwrap();
               if cfg!(debug_assertions) {
-                let count: usize = socket.channels.iter().filter_map(|ch_opt|ch_opt.as_ref()).map(|ch|ch.sinks.len()).sum();
-                if count>0 {
-                  error!("BUG: still have {} channels when removing socket index {index}", socket.channels.len());
+                let count: usize = socket
+                  .channels
+                  .iter()
+                  .filter_map(|ch_opt| ch_opt.as_ref())
+                  .map(|ch| ch.sinks.len())
+                  .sum();
+                if count > 0 {
+                  error!(
+                    "BUG: still have {} channels when removing socket index {index}",
+                    socket.channels.len()
+                  );
                 }
               }
               let _ = socket;
             }
             Command::ConnectChannel { socket_index, channel_in_flow, sink } => {
               if cfg!(debug_assertions) {
-                for sd in self.sockets.iter().filter_map(|opt|opt.as_ref()) {
-                  for ch in sd.channels.iter().filter_map(|opt|opt.as_ref()) {
+                for sd in self.sockets.iter().filter_map(|opt| opt.as_ref()) {
+                  for ch in sd.channels.iter().filter_map(|opt| opt.as_ref()) {
                     for existing_sink in &ch.sinks {
                       assert!(!Arc::ptr_eq(sink.shared(), existing_sink.shared()));
                     }
@@ -262,10 +303,18 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
               }
               let socket = self.sockets[socket_index].as_mut().unwrap();
 
-              let timestamp_shift = start_timestamp.map(|start_ts| (0 as ClockDiff).wrapping_sub_unsigned(start_ts).wrapping_add_unsigned(socket.latency_samples.try_into().unwrap())).unwrap_or(0);
+              let timestamp_shift = start_timestamp
+                .map(|start_ts| {
+                  (0 as ClockDiff)
+                    .wrapping_sub_unsigned(start_ts)
+                    .wrapping_add_unsigned(socket.latency_samples.try_into().unwrap())
+                })
+                .unwrap_or(0);
 
               // prefer existing sink - this ensures that buffer is erased properly but not excessively
-              let sink = if let Some(existing_index) = self.silence_writers.iter().position(|sw|Arc::ptr_eq(sw.sink.shared(), sink.shared())) {
+              let sink = if let Some(existing_index) =
+                self.silence_writers.iter().position(|sw| Arc::ptr_eq(sw.sink.shared(), sink.shared()))
+              {
                 self.silence_writers.swap_remove(existing_index).sink
                 // TODO: previous sink is dropped. is freeing memory in realtime thread safe???
               } else {
@@ -284,11 +333,8 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                 debug_assert!(sinks.is_empty());
                 debug_assert!(sinks.capacity() > 0);
                 sinks.push(sink);
-                *channel_opt = Some(Channel {
-                  sinks,
-                  latency_samples: socket.latency_samples,
-                  timestamp_shift,
-                });
+                *channel_opt =
+                  Some(Channel { sinks, latency_samples: socket.latency_samples, timestamp_shift });
               } else {
                 let channel = channel_opt.as_mut().unwrap();
                 debug_assert!(channel.sinks.capacity() > channel.sinks.len());
@@ -298,12 +344,18 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             Command::DisconnectChannel { socket_index, channel_in_flow, rb_shared } => {
               if let Some(sd) = self.sockets[socket_index].as_mut() {
                 if let Some(ch) = sd.channels[channel_in_flow].as_mut() {
-                  let sink_index_opt = ch.sinks.iter().position(|sink|Arc::ptr_eq(sink.shared(), &rb_shared));
+                  let sink_index_opt =
+                    ch.sinks.iter().position(|sink| Arc::ptr_eq(sink.shared(), &rb_shared));
                   if let Some(sink_index) = sink_index_opt {
                     let sink = ch.sinks.swap_remove(sink_index);
                     if let Some(now) = self.clock.now_in_timebase(self.sample_rate.into()) {
                       let rb_size = sink.ring_buffer_size();
-                      let writer = SilenceWriter { sink, end_timestamp: now.wrapping_add(rb_size + rb_size/2 /*TODO: ???*/).wrapping_add_signed(ch.timestamp_shift) };
+                      let writer = SilenceWriter {
+                        sink,
+                        end_timestamp: now
+                          .wrapping_add(rb_size + rb_size / 2 /*TODO: ???*/)
+                          .wrapping_add_signed(ch.timestamp_shift),
+                      };
                       self.silence_writers.push(writer);
                     } else {
                       warn!("no media clock, unable to initialize SilenceWriter");
@@ -313,10 +365,10 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
               }
             }
             Command::NoOp => {}
-          }
+          },
           Err(TryRecvError::Empty) => {
             may_have_command = false;
-          },
+          }
           Err(TryRecvError::Disconnected) => {
             break;
           }
@@ -332,8 +384,8 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           // Normally this position will be already written because in self.receive we are writing into future
           // (write position is increased by latency_samples)
           // However, if the stream breaks, it will ensure that buffer is filled with zeros
-          for sd in self.sockets.iter().filter_map(|opt|opt.as_ref()) {
-            for ch in sd.channels.iter().filter_map(|opt|opt.as_ref()) {
+          for sd in self.sockets.iter().filter_map(|opt| opt.as_ref()) {
+            for ch in sd.channels.iter().filter_map(|opt| opt.as_ref()) {
               for sink in &ch.sinks {
                 sink.close_items_until(ts);
               }
@@ -404,32 +456,69 @@ pub struct FlowsReceiver<P: ProxyToSamplesBuffer> {
 }
 
 impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
-  fn run(rx: mpsc::Receiver<Command<P>>, poll: mio::Poll, sample_rate: u32, ref_instant: Instant, clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, on_transfer: Option<Box<dyn Fn() + Send>>, current_timestamp: Arc<AtomicUsize>, max_channels: usize) {
-    let mut internal =
-      FlowsReceiverInternal {
-        commands_receiver: rx,
-        sockets: (0..MAX_FLOWS).map(|_|None).collect_vec(),
-        silence_writers: Vec::with_capacity(max_channels),
-        poll,
-        sample_rate,
-        clock: MediaClock::new(),
-        clock_recv,
-        ref_instant,
-        on_transfer,
-        current_timestamp,
-      };
+  fn run(
+    rx: mpsc::Receiver<Command<P>>,
+    poll: mio::Poll,
+    sample_rate: u32,
+    ref_instant: Instant,
+    clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
+    start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
+    on_transfer: Option<Box<dyn Fn() + Send>>,
+    current_timestamp: Arc<AtomicUsize>,
+    max_channels: usize,
+  ) {
+    let mut internal = FlowsReceiverInternal {
+      commands_receiver: rx,
+      sockets: (0..MAX_FLOWS).map(|_| None).collect_vec(),
+      silence_writers: Vec::with_capacity(max_channels),
+      poll,
+      sample_rate,
+      clock: MediaClock::new(),
+      clock_recv,
+      ref_instant,
+      on_transfer,
+      current_timestamp,
+    };
     internal.run(start_time_rx);
   }
-  pub fn start(self_info: Arc<DeviceInfo>, clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>, ref_instant: Instant, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, current_timestamp: Arc<AtomicUsize>, on_transfer: Option<Box<dyn Fn() + Send>>) -> (Self, JoinHandle<()>) {
+  pub fn start(
+    self_info: Arc<DeviceInfo>,
+    clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
+    ref_instant: Instant,
+    start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
+    current_timestamp: Arc<AtomicUsize>,
+    on_transfer: Option<Box<dyn Fn() + Send>>,
+  ) -> (Self, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(100);
     let poll = mio::Poll::new().unwrap();
     let waker = mio::Waker::new(poll.registry(), WAKE_TOKEN).unwrap();
     let srate = self_info.sample_rate;
     let max_channels = self_info.rx_channels.len();
-    let thread_join = std::thread::Builder::new().name("flows RX".to_owned()).spawn(move || {
-      Self::run(rx, poll, srate, ref_instant, clock_recv, start_time_rx, on_transfer, current_timestamp, max_channels);
-    }).unwrap();
-    return (Self { commands_sender: tx, waker, max_channels, flows_info: Arc::new(RwLock::new((0..MAX_FLOWS).map(|_|None).collect_vec())) }, thread_join);
+    let thread_join = std::thread::Builder::new()
+      .name("flows RX".to_owned())
+      .spawn(move || {
+        Self::run(
+          rx,
+          poll,
+          srate,
+          ref_instant,
+          clock_recv,
+          start_time_rx,
+          on_transfer,
+          current_timestamp,
+          max_channels,
+        );
+      })
+      .unwrap();
+    return (
+      Self {
+        commands_sender: tx,
+        waker,
+        max_channels,
+        flows_info: Arc::new(RwLock::new((0..MAX_FLOWS).map(|_| None).collect_vec())),
+      },
+      thread_join,
+    );
   }
   pub async fn shutdown(&self) {
     self.commands_sender.send(Command::Shutdown).await.log_and_forget();
@@ -447,11 +536,13 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
   ) {
     // TODO: it would be more logical to move socket creation here from channels_subscriber.rs which is already convoluted
     debug!("adding flow receiver local index={local_index}");
-    let empty_sinks_vecs = (0..channels_count).map(|_| {
-      let mut v = vec![];
-      v.reserve_exact(self.max_channels);
-      v
-    }).collect_vec();
+    let empty_sinks_vecs = (0..channels_count)
+      .map(|_| {
+        let mut v = vec![];
+        v.reserve_exact(self.max_channels);
+        v
+      })
+      .collect_vec();
     let port = socket.local_addr().unwrap().port();
     let als: Arc<AtomicI32> = Arc::new(0.into());
     self.flows_info.write().unwrap()[local_index] = Some(FlowInfo {
@@ -486,12 +577,19 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     self.commands_sender.send(Command::RemoveSocket { index: local_index }).await.log_and_forget();
     self.waker.wake().log_and_forget();
   }
-  pub async fn connect_channel(&self, local_flow_index: usize, channel_in_flow: usize, local_channel_index: usize, sink: RBInput<Sample, P>) {
+  pub async fn connect_channel(
+    &self,
+    local_flow_index: usize,
+    channel_in_flow: usize,
+    local_channel_index: usize,
+    sink: RBInput<Sample, P>,
+  ) {
     debug!("connecting channel: flow index={local_flow_index}, channel in flow: {channel_in_flow}");
 
     {
       let mut flows_info = self.flows_info.write().unwrap();
-      flows_info[local_flow_index].as_mut().unwrap().channels_map[channel_in_flow].set(local_channel_index, true);
+      flows_info[local_flow_index].as_mut().unwrap().channels_map[channel_in_flow]
+        .set(local_channel_index, true);
     }
 
     self
@@ -501,12 +599,19 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       .log_and_forget();
     self.waker.wake().log_and_forget();
   }
-  pub async fn disconnect_channel(&self, local_flow_index: usize, channel_in_flow: usize, local_channel_index: usize, rb_shared: Arc<RingBufferShared<Sample, P>>) {
+  pub async fn disconnect_channel(
+    &self,
+    local_flow_index: usize,
+    channel_in_flow: usize,
+    local_channel_index: usize,
+    rb_shared: Arc<RingBufferShared<Sample, P>>,
+  ) {
     debug!("disconnecting channel: flow index={local_flow_index}, channel in flow: {channel_in_flow}");
 
     {
       let mut flows_info = self.flows_info.write().unwrap();
-      flows_info[local_flow_index].as_mut().unwrap().channels_map[channel_in_flow].set(local_channel_index, false);
+      flows_info[local_flow_index].as_mut().unwrap().channels_map[channel_in_flow]
+        .set(local_channel_index, false);
     }
 
     self

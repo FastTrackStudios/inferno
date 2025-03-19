@@ -22,16 +22,15 @@ use std::{
 use crate::device_info::DeviceInfo;
 use crate::net_utils::MTU;
 use bytebuffer::ByteBuffer;
+use thiserror::Error;
 use tokio::{
   net::UdpSocket,
   time::{timeout_at, Instant},
 };
-use thiserror::Error;
 
 use super::req_resp::{make_packet, req_resp_packet, HEADER_LENGTH};
 
 pub const PORT: u16 = 4455;
-
 
 #[derive(Error, Debug)]
 pub enum FlowControlError {
@@ -40,7 +39,7 @@ pub enum FlowControlError {
   #[error("too many TX flows")]
   TooManyTXFlows = 0x0315,
   #[error("sample rate mismatch")]
-  SampleRateMismatch = 0x0301
+  SampleRateMismatch = 0x0301,
 }
 
 pub struct FlowsControlClient {
@@ -73,8 +72,7 @@ impl FlowsControlClient {
     content: &[u8],
   ) -> Result<req_resp_packet::View<&'a [u8]>, Box<dyn Error>> {
     let send_seqnum = self.seqnum.fetch_add(1, Ordering::AcqRel);
-    let pkt_to_send =
-      make_packet(recvbuf, /*start_code*/ 0x1102, send_seqnum, opcode1, 0, content);
+    let pkt_to_send = make_packet(recvbuf, /*start_code*/ 0x1102, send_seqnum, opcode1, 0, content);
     socket.send(pkt_to_send).await?;
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {

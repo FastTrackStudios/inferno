@@ -4,10 +4,7 @@ use crate::protocol::mcast::make_channel_change_notification;
 use crate::samples_collector::SamplesCollector;
 use crate::state_storage::StateStorage;
 use crate::MediaClock;
-use crate::{
-  common::*, mdns_client::AdvertisedChannel,
-  protocol::flows_control::FlowHandle,
-};
+use crate::{common::*, mdns_client::AdvertisedChannel, protocol::flows_control::FlowHandle};
 
 use crate::device_info::DeviceInfo;
 use crate::{
@@ -15,11 +12,15 @@ use crate::{
   protocol::flows_control::FlowsControlClient,
 };
 
-use crate::ring_buffer::{self, ExternalBuffer, ExternalBufferParameters, OwnedBuffer, ProxyToSamplesBuffer, RBInput, RBOutput, RingBufferShared};
+use crate::ring_buffer::{
+  self, ExternalBuffer, ExternalBufferParameters, OwnedBuffer, ProxyToSamplesBuffer, RBInput, RBOutput,
+  RingBufferShared,
+};
 
 use atomic::Atomic;
 use futures::{future::join_all, Future, FutureExt};
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::{
   collections::{BTreeMap, BTreeSet},
@@ -32,7 +33,6 @@ use std::{
   time::{Duration, Instant},
 };
 use tokio::{sync::mpsc, time::sleep, time::timeout};
-use serde::{Serialize, Deserialize};
 
 const REORDER_WAIT_SAMPLES: usize = 4800;
 
@@ -79,16 +79,19 @@ struct SavedChannelState {
   /// purely informational, only written, not read!
   local_channel_name: String,
   tx_channel_name: String,
-  tx_hostname: String
+  tx_hostname: String,
 }
 
 #[derive(Serialize, Deserialize)]
 struct SavedChannelsState {
-  channels: Vec<SavedChannelState>
+  channels: Vec<SavedChannelState>,
 }
 
 impl ChannelsSubscriber {
-  pub fn new<P: ProxyToSamplesBuffer + Send + Sync + 'static, B: ChannelsBuffering<P> + Send + Sync + 'static>(
+  pub fn new<
+    P: ProxyToSamplesBuffer + Send + Sync + 'static,
+    B: ChannelsBuffering<P> + Send + Sync + 'static,
+  >(
     self_info: Arc<DeviceInfo>,
     media_clock: Arc<RwLock<MediaClock>>,
     flows_recv: Arc<FlowsReceiver<P>>,
@@ -121,12 +124,7 @@ impl ChannelsSubscriber {
     );
     return (r, async move { internal.run(start_time_rx).await }.boxed());
   }
-  pub async fn subscribe(
-    &self,
-    local_channel_index: usize,
-    tx_channel_name: &str,
-    tx_hostname: &str,
-  ) {
+  pub async fn subscribe(&self, local_channel_index: usize, tx_channel_name: &str, tx_hostname: &str) {
     // we must (TODO: really?) update subscriptions_info here because Dante Controller requests rx subscriptions list right after receiving a response to subscribe request
     self.subscriptions_info.write().unwrap()[local_channel_index] = Some(SubscriptionInfo {
       tx_hostname: tx_hostname.to_owned(),
@@ -160,10 +158,22 @@ impl ChannelsSubscriber {
   }
 }
 
-
 pub trait ChannelsBuffering<P: ProxyToSamplesBuffer> {
-  fn connect_channel(&mut self, start_time: Clock, start_time_shift: ClockDiff, rb_output: &mut Option<RBOutput<Sample, P>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, P>>;
-  fn disconnect_channel(&mut self, channel_index: usize, flow_index: usize, channel_in_flow: usize, flows_recv: Arc<FlowsReceiver<P>>);
+  fn connect_channel(
+    &mut self,
+    start_time: Clock,
+    start_time_shift: ClockDiff,
+    rb_output: &mut Option<RBOutput<Sample, P>>,
+    channel_index: usize,
+    latency_samples: usize,
+  ) -> Option<RBInput<Sample, P>>;
+  fn disconnect_channel(
+    &mut self,
+    channel_index: usize,
+    flow_index: usize,
+    channel_in_flow: usize,
+    flows_recv: Arc<FlowsReceiver<P>>,
+  );
 }
 
 pub struct OwnedBuffering {
@@ -173,13 +183,24 @@ pub struct OwnedBuffering {
 }
 
 impl OwnedBuffering {
-  pub fn new(buffer_length: usize, hole_fix_wait: usize, samples_collector: Arc<SamplesCollector<OwnedBuffer<Atomic<Sample>>>>) -> Self {
+  pub fn new(
+    buffer_length: usize,
+    hole_fix_wait: usize,
+    samples_collector: Arc<SamplesCollector<OwnedBuffer<Atomic<Sample>>>>,
+  ) -> Self {
     Self { buffer_length, hole_fix_wait, samples_collector }
   }
 }
 
 impl ChannelsBuffering<OwnedBuffer<Atomic<Sample>>> for OwnedBuffering {
-  fn connect_channel(&mut self, start_time: Clock, _start_time_shift: ClockDiff, rb_output: &mut Option<RBOutput<Sample, OwnedBuffer<Atomic<Sample>>>>, channel_index: usize, latency_samples: usize) -> Option<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>> {
+  fn connect_channel(
+    &mut self,
+    start_time: Clock,
+    _start_time_shift: ClockDiff,
+    rb_output: &mut Option<RBOutput<Sample, OwnedBuffer<Atomic<Sample>>>>,
+    channel_index: usize,
+    latency_samples: usize,
+  ) -> Option<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>> {
     let (sink, source) = if rb_output.is_none() {
       let (sink, source) =
         ring_buffer::new_owned::<Sample>(self.buffer_length, start_time as usize, self.hole_fix_wait);
@@ -194,7 +215,13 @@ impl ChannelsBuffering<OwnedBuffer<Atomic<Sample>>> for OwnedBuffering {
     });
     sink
   }
-  fn disconnect_channel(&mut self, channel_index: usize, _flow_index: usize, _channel_in_flow: usize, _flows_recv: Arc<FlowsReceiver<OwnedBuffer<Atomic<Sample>>>>) {
+  fn disconnect_channel(
+    &mut self,
+    channel_index: usize,
+    _flow_index: usize,
+    _channel_in_flow: usize,
+    _flows_recv: Arc<FlowsReceiver<OwnedBuffer<Atomic<Sample>>>>,
+  ) {
     let sc = self.samples_collector.clone();
     tokio::spawn(async move {
       sc.disconnect_channel(channel_index).await;
@@ -212,22 +239,32 @@ pub struct ExternalBuffering {
 impl ExternalBuffering {
   pub fn new(channels: Vec<ExternalBufferParameters<Sample>>, hole_fix_wait: usize) -> Self {
     let channels_count = channels.len();
-    let ring_buffers = (0..channels_count).map(|chi|ring_buffer::shared_from_external(&channels[chi], 0)).collect_vec();
-    Self {
-      channels,
-      hole_fix_wait,
-      ring_buffers,
-    }
+    let ring_buffers =
+      (0..channels_count).map(|chi| ring_buffer::shared_from_external(&channels[chi], 0)).collect_vec();
+    Self { channels, hole_fix_wait, ring_buffers }
   }
 }
 
 impl ChannelsBuffering<ExternalBuffer<Atomic<Sample>>> for ExternalBuffering {
-  fn connect_channel(&mut self, start_time: Clock, start_time_shift: ClockDiff, rb_output: &mut Option<RBOutput<Sample, ExternalBuffer<Atomic<Sample>>>>, channel_index: usize, _latency_samples: usize) -> Option<RBInput<Sample, ExternalBuffer<Atomic<Sample>>>> {
+  fn connect_channel(
+    &mut self,
+    start_time: Clock,
+    start_time_shift: ClockDiff,
+    rb_output: &mut Option<RBOutput<Sample, ExternalBuffer<Atomic<Sample>>>>,
+    channel_index: usize,
+    _latency_samples: usize,
+  ) -> Option<RBInput<Sample, ExternalBuffer<Atomic<Sample>>>> {
     debug_assert!(rb_output.is_none());
     let rb_input = RBInput::new(self.ring_buffers[channel_index].clone(), self.hole_fix_wait);
     Some(rb_input)
   }
-  fn disconnect_channel(&mut self, channel_index: usize, flow_index: usize, channel_in_flow: usize, flows_recv: Arc<FlowsReceiver<ExternalBuffer<Atomic<Sample>>>>) {
+  fn disconnect_channel(
+    &mut self,
+    channel_index: usize,
+    flow_index: usize,
+    channel_in_flow: usize,
+    flows_recv: Arc<FlowsReceiver<ExternalBuffer<Atomic<Sample>>>>,
+  ) {
     // TODO: this is a bit illogical, flows_recv.{connect_channel, disconnect_channel} should be in one place
     let rb_shared = self.ring_buffers[channel_index].clone();
     tokio::spawn(async move {
@@ -248,7 +285,7 @@ struct MulticastFlow {
 
 enum FlowSource {
   Unicast(UnicastFlow),
-  Multicast(MulticastFlow)
+  Multicast(MulticastFlow),
 }
 
 struct Flow<P: ProxyToSamplesBuffer> {
@@ -327,7 +364,9 @@ struct ChannelsSubscriberInternal<P: ProxyToSamplesBuffer, B: ChannelsBuffering<
   resolve_now: bool,
 }
 
-impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> ChannelsSubscriberInternal<P, B> {
+impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
+  ChannelsSubscriberInternal<P, B>
+{
   pub fn new(
     commands_receiver: mpsc::Receiver<Command>,
     self_info: Arc<DeviceInfo>,
@@ -364,16 +403,17 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     };
   }
   async fn notify_channels_change(&self, channel_indices: impl IntoIterator<Item = usize>) {
-    self
-      .mcast
-      .send(make_channel_change_notification(channel_indices))
-      .await
-      .log_and_forget();
+    self.mcast.send(make_channel_change_notification(channel_indices)).await.log_and_forget();
   }
   pub async fn unsubscribe(&mut self, local_channel_index: usize, remove_from_info: bool) {
     if let Some(subscription) = &self.channels[local_channel_index] {
       if let Some(remote) = subscription.remote.as_ref() {
-        self.channels_buffering.disconnect_channel(local_channel_index, remote.local_flow_index, remote.channel_in_flow, self.flows_recv.clone());
+        self.channels_buffering.disconnect_channel(
+          local_channel_index,
+          remote.local_flow_index,
+          remote.channel_in_flow,
+          self.flows_recv.clone(),
+        );
         match &mut self.flows.lock().unwrap()[remote.local_flow_index] {
           Some(flow) => {
             flow.channels_refcount[remote.channel_in_flow] -= 1;
@@ -494,24 +534,23 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
 
     // Resolve MDNS _chan services:
     // TODO resolve more channels in single query instead of spawning multiple resolvers
-    let dns_resolve_futures =
-      needed_channel_indices.iter().enumerate().map(|(i, &local_ch_index)| {
-        let chsub = self.channels[local_ch_index].as_ref().unwrap();
-        let mdns_client = self.mdns_client.clone();
-        async move {
-          sleep(Duration::from_millis(8 * i as u64)).await;
-          let result = mdns_client.query_chan(&chsub.tx_hostname, &chsub.tx_channel_name).await;
-          debug!("{:?}", result);
-          return (
-            local_ch_index,
-            match result {
-              Ok(v) => Some(v),
-              Err(_) => None,
-            },
-          );
-        }
-        .boxed()
-      });
+    let dns_resolve_futures = needed_channel_indices.iter().enumerate().map(|(i, &local_ch_index)| {
+      let chsub = self.channels[local_ch_index].as_ref().unwrap();
+      let mdns_client = self.mdns_client.clone();
+      async move {
+        sleep(Duration::from_millis(8 * i as u64)).await;
+        let result = mdns_client.query_chan(&chsub.tx_hostname, &chsub.tx_channel_name).await;
+        debug!("{:?}", result);
+        return (
+          local_ch_index,
+          match result {
+            Ok(v) => Some(v),
+            Err(_) => None,
+          },
+        );
+      }
+      .boxed()
+    });
 
     trace!("after mdns");
 
@@ -523,7 +562,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         match &advserv.multicast {
           None => {
             channels_per_server.entry(advserv.addr).or_default().insert(lci, advserv);
-          },
+          }
           Some(mcast) => {
             // this channel is readily available in multicast, no need to send any requests
             let bundle_name = format!("{}@{}", mcast.bundle_id, mcast.tx_hostname);
@@ -545,28 +584,29 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
       .map(|(&addr, _)| addr)
       .collect_vec();
     for addr in bad_servers {
-      error!("Server {addr} has different values of nchan, bits per sample or dbcp1. This is unsupported.");
+      error!(
+        "Server {addr} has different values of nchan, bits per sample or dbcp1. This is unsupported."
+      );
       channels_per_server.remove(&addr);
     }
 
     // TODO check sample rate so that we don't request flows from devices with incompatible sample rate
 
     // Resolve multicast bundles:
-    let dns_resolve_futures =
-      channels_per_bundle.keys().enumerate().map(|(i, bund_full_name)| {
-        let mdns_client = self.mdns_client.clone();
-        let bund_full_name = bund_full_name.clone();
-        async move {
-          sleep(Duration::from_millis(8 * i as u64)).await;
-          let result = mdns_client.query_bund(&bund_full_name).await;
-          debug!("{:?}", result);
-          match result {
-            Ok(v) => Some((bund_full_name, v)),
-            Err(_) => None,
-          }
+    let dns_resolve_futures = channels_per_bundle.keys().enumerate().map(|(i, bund_full_name)| {
+      let mdns_client = self.mdns_client.clone();
+      let bund_full_name = bund_full_name.clone();
+      async move {
+        sleep(Duration::from_millis(8 * i as u64)).await;
+        let result = mdns_client.query_bund(&bund_full_name).await;
+        debug!("{:?}", result);
+        match result {
+          Ok(v) => Some((bund_full_name, v)),
+          Err(_) => None,
         }
-        .boxed()
-      });
+      }
+      .boxed()
+    });
     let mut bundles: BTreeMap<_, _> = join_all(dns_resolve_futures).await.into_iter().flatten().collect();
 
     let mut free_slots_per_server = BTreeMap::<SocketAddr, BTreeMap<usize, BTreeSet<usize>>>::new();
@@ -635,7 +675,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
                   resolved.append(&mut updates);
                 }
               }
-            },
+            }
             FlowSource::Multicast(mf) => {
               match channels_per_bundle.entry(mf.bundle_full_name.clone()) {
                 Entry::Vacant(_) => continue,
@@ -645,20 +685,19 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
                   let mut updates = channels
                     .get()
                     .iter()
-                    .map(|(lci, advch)| {
-                      ChannelSourceUpdate {
-                        local_channel_indices: channel_index_aliases[lci].clone(),
-                        remote: ChannelOtherEnd {
-                          local_flow_index: flow_index,
-                          channel_in_flow: advch.multicast.as_ref().unwrap().channel_in_bundle,
-                          tx_channel_id: advch.tx_channel_id,
-                        },
-                      }
-                    }).collect_vec();
+                    .map(|(lci, advch)| ChannelSourceUpdate {
+                      local_channel_indices: channel_index_aliases[lci].clone(),
+                      remote: ChannelOtherEnd {
+                        local_flow_index: flow_index,
+                        channel_in_flow: advch.multicast.as_ref().unwrap().channel_in_bundle,
+                        tx_channel_id: advch.tx_channel_id,
+                      },
+                    })
+                    .collect_vec();
                   resolved.append(&mut updates);
                 }
               }
-            },
+            }
           }
         }
       }
@@ -709,9 +748,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
                   let dbcp1 = uf.dbcp1;
                   let handle = uf.handle.unwrap();
                   async move {
-                    match control_client
-                      .update_flow(&server_addr, dbcp1, handle, &new_tx_channels)
-                      .await
+                    match control_client.update_flow(&server_addr, dbcp1, handle, &new_tx_channels).await
                     {
                       Ok(()) => {
                         debug!("update flow {updates:?} request success");
@@ -746,7 +783,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         };
         let mcast_ipv4 = match advbundle.media_addr.ip() {
           std::net::IpAddr::V4(ip) => ip,
-          _ => panic!("media multicast address is not ipv4")
+          _ => panic!("media multicast address is not ipv4"),
         };
         if let Err(e) = socket.join_multicast_v4(&mcast_ipv4, &self.self_info.ip_address) {
           error!("failed to join multicast group {:?}: {e:?}", advbundle.media_addr.ip());
@@ -760,16 +797,18 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
           }
         };
         let flow_id = flow_index + 1;
-        let source = FlowSource::Multicast(MulticastFlow {
-          bundle_full_name: bundle_full_name.clone(),
-        });
+        let source = FlowSource::Multicast(MulticastFlow { bundle_full_name: bundle_full_name.clone() });
         let needed_channels = channels_per_bundle.get(bundle_full_name).unwrap();
         let flow = Flow::new(
           flow_id,
           source,
           advbundle.tx_channels_per_flow,
           vec![], // tx_channels aren't read in case of multicast flows, so no need to initialize
-          ((advbundle.min_rx_latency_ns as u64).max(self.min_latency_ns as u64) * (self.self_info.sample_rate as u64) / 1_000_000_000u64).try_into().unwrap(),
+          ((advbundle.min_rx_latency_ns as u64).max(self.min_latency_ns as u64)
+            * (self.self_info.sample_rate as u64)
+            / 1_000_000_000u64)
+            .try_into()
+            .unwrap(),
           self.ref_instant.elapsed().as_secs() as _,
         );
         let time_arc = flow.last_packet_time.clone();
@@ -778,16 +817,19 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         let flows_recv = self.flows_recv.clone();
         let media_addr = advbundle.media_addr;
         let advbundle = advbundle.clone();
-        let updates = Some(needed_channels.iter().map(|(lci, advch)| {
-          ChannelSourceUpdate {
-            local_channel_indices: channel_index_aliases[lci].clone(),
-            remote: ChannelOtherEnd {
-              local_flow_index: flow_index,
-              channel_in_flow: advch.multicast.as_ref().unwrap().channel_in_bundle,
-              tx_channel_id: advch.tx_channel_id,
-            },
-          }
-        }).collect_vec());
+        let updates = Some(
+          needed_channels
+            .iter()
+            .map(|(lci, advch)| ChannelSourceUpdate {
+              local_channel_indices: channel_index_aliases[lci].clone(),
+              remote: ChannelOtherEnd {
+                local_flow_index: flow_index,
+                channel_in_flow: advch.multicast.as_ref().unwrap().channel_in_bundle,
+                tx_channel_id: advch.tx_channel_id,
+              },
+            })
+            .collect_vec(),
+        );
         let future = async move {
           flows_recv
             .add_socket(
@@ -801,7 +843,8 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
             )
             .await;
           updates
-        }.boxed();
+        }
+        .boxed();
         futures_per_server.entry(media_addr).or_default().push(future);
       }
 
@@ -823,13 +866,21 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
           let tx_channels = chunk.iter().map(|(_, chadv)| chadv.tx_channel_id);
           let flow_id = flow_index + 1;
           let flow_name = format!("{}_{}", flow_id, self.self_info.process_id);
-          let source = FlowSource::Unicast(UnicastFlow {control_remote_addr: first.addr, dbcp1: first.dbcp1, handle: None});
+          let source = FlowSource::Unicast(UnicastFlow {
+            control_remote_addr: first.addr,
+            dbcp1: first.dbcp1,
+            handle: None,
+          });
           let flow = Flow::new(
             flow_id,
             source,
             first.tx_channels_per_flow.min(self.self_info.rx_channels.len()).min(8), /*TODO make it configurable*/
             tx_channels,
-            ((first.min_rx_latency_ns as u64).max(self.min_latency_ns as u64) * (self.self_info.sample_rate as u64) / 1_000_000_000u64).try_into().unwrap(),
+            ((first.min_rx_latency_ns as u64).max(self.min_latency_ns as u64)
+              * (self.self_info.sample_rate as u64)
+              / 1_000_000_000u64)
+              .try_into()
+              .unwrap(),
             self.ref_instant.elapsed().as_secs() as _,
           );
 
@@ -856,7 +907,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
           let control_client = self.control_client.clone();
           let subscription_info = self.subscriptions_info.clone();
           let sample_rate = self.self_info.sample_rate;
-          
+
           let future = async move {
             let (socket, port) = match create_mio_udp_socket(self_ip) {
               Ok(v) => v,
@@ -866,8 +917,10 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
                 return None;
               }
             };
-            
-            let fpp_mtu_limit = (MAX_PAYLOAD_BYTES / (tx_channels.len() * (first.bits_per_sample as usize)/8)).min(u16::MAX as usize) as u16;
+
+            let fpp_mtu_limit = (MAX_PAYLOAD_BYTES
+              / (tx_channels.len() * (first.bits_per_sample as usize) / 8))
+              .min(u16::MAX as usize) as u16;
             let handle = match control_client
               .request_flow(
                 &first.addr,
@@ -913,7 +966,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
             } else {
               error!("BUG: unexpected non-unicast flow when trying to assign handle");
             }
-            
+
             return Some(updates);
           }
           .boxed();
@@ -969,21 +1022,29 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
           if flow.channels_rb_outputs[remote.channel_in_flow].is_none() {
             // ringbuffer doesn't exist yet (this channel in flow wasn't used before)
             let local_id = flow.local_id;
-            debug_assert!(local_id == remote.local_flow_index+1);
+            debug_assert!(local_id == remote.local_flow_index + 1);
           }
           let latency_samples = flow.latency_samples;
-          let sink_opt = self.channels_buffering.connect_channel(now /* FIXME shift */, self.ring_buffer_timestamp_shift, &mut flow.channels_rb_outputs[remote.channel_in_flow], chi, latency_samples);
+          let sink_opt = self.channels_buffering.connect_channel(
+            now, /* FIXME shift */
+            self.ring_buffer_timestamp_shift,
+            &mut flow.channels_rb_outputs[remote.channel_in_flow],
+            chi,
+            latency_samples,
+          );
           if let Some(sink) = sink_opt {
             let flows_recv = self.flows_recv.clone();
             tokio::spawn(async move {
-              flows_recv.connect_channel(remote.local_flow_index, remote.channel_in_flow, chi, sink).await;
+              flows_recv
+                .connect_channel(remote.local_flow_index, remote.channel_in_flow, chi, sink)
+                .await;
             });
           }
           subscription.remote = Some(remote);
           subinfos[chi] = Some(SubscriptionInfo {
             tx_channel_name: subscription.tx_channel_name.clone(),
             tx_hostname: subscription.tx_hostname.clone(),
-            status: SubscriptionStatus::InProgress
+            status: SubscriptionStatus::InProgress,
           });
           changed_channels.push(chi);
           // TODO probably some lines can be brought out of this loop
@@ -1040,18 +1101,23 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
                             "channel subscribed to {}@{} is orphaned now",
                             chsub.tx_channel_name, chsub.tx_hostname
                           );
-                          if let Some(subi) = self.subscriptions_info.write().unwrap()[chi].as_mut()
-                          {
+                          if let Some(subi) = self.subscriptions_info.write().unwrap()[chi].as_mut() {
                             subi.status = SubscriptionStatus::Unresolved;
                             channels_changed.push(chi);
                           }
-                          self.channels_buffering.disconnect_channel(chi, flow_index, channel_in_flow, self.flows_recv.clone());
+                          self.channels_buffering.disconnect_channel(
+                            chi,
+                            flow_index,
+                            channel_in_flow,
+                            self.flows_recv.clone(),
+                          );
                         } else if receiving {
-                          if let Some(subi) = self.subscriptions_info.write().unwrap()[chi].as_mut()
-                          {
+                          if let Some(subi) = self.subscriptions_info.write().unwrap()[chi].as_mut() {
                             let (status, desc) = match flow.source {
                               FlowSource::Unicast(_) => (SubscriptionStatus::ReceivingUnicast, "unicast"),
-                              FlowSource::Multicast(_) => (SubscriptionStatus::ReceivingMulticast, "multicast"),
+                              FlowSource::Multicast(_) => {
+                                (SubscriptionStatus::ReceivingMulticast, "multicast")
+                              }
                             };
                             if subi.status != status {
                               info!(
@@ -1091,13 +1157,13 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
                       }
                       .boxed(),
                     );
-                  },
+                  }
                   FlowSource::Multicast(mf) => {
                     let flows_recv = self.flows_recv.clone();
                     tokio::spawn(async move {
                       flows_recv.remove_socket(flow_index).await;
                     });
-                  },
+                  }
                 }
 
                 Some(flow_index)
@@ -1149,8 +1215,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     let mut last_resolving = Instant::now();
     loop {
       // TODO make it more NOHZ
-      let mut received = match timeout(Duration::from_secs(2), self.commands_receiver.recv()).await
-      {
+      let mut received = match timeout(Duration::from_secs(2), self.commands_receiver.recv()).await {
         Ok(Some(command)) => Some(command),
         Ok(None) => break,
         Err(_) => None,
@@ -1170,8 +1235,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
         // received subscribe or unsubscribe command, which means that state needs to be saved
         self.save_state();
       }
-      if (self.needs_resolving && last_resolving.elapsed() >= Duration::from_secs(9))
-        || self.resolve_now
+      if (self.needs_resolving && last_resolving.elapsed() >= Duration::from_secs(9)) || self.resolve_now
       {
         self.resolve_subscriptions().await;
         last_resolving = Instant::now();
@@ -1180,19 +1244,24 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
     }
   }
   fn save_state(&self) {
-    let state = SavedChannelsState { channels:
-      self.channels.iter().enumerate().filter_map(|(index, sub)| {
-        match sub {
-          // TODO: also save channel names without subscriptions...somehow.
-          None => None,
-          Some(sub) => Some(SavedChannelState {
-            local_channel_id: (index+1) as u16,
-            local_channel_name: self.self_info.rx_channels[index].friendly_name.read().unwrap().clone(),
-            tx_channel_name: sub.tx_channel_name.clone(),
-            tx_hostname: sub.tx_hostname.clone()
-          })
-        }
-      }).collect_vec()
+    let state = SavedChannelsState {
+      channels: self
+        .channels
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sub)| {
+          match sub {
+            // TODO: also save channel names without subscriptions...somehow.
+            None => None,
+            Some(sub) => Some(SavedChannelState {
+              local_channel_id: (index + 1) as u16,
+              local_channel_name: self.self_info.rx_channels[index].friendly_name.read().unwrap().clone(),
+              tx_channel_name: sub.tx_channel_name.clone(),
+              tx_hostname: sub.tx_hostname.clone(),
+            }),
+          }
+        })
+        .collect_vec(),
     };
     self.state_storage.save("rx_subscriptions", &state).log_and_forget();
   }
@@ -1209,7 +1278,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>> C
       result.unwrap().channels
     };
     for chst in channels {
-      let lci = chst.local_channel_id as usize-1;
+      let lci = chst.local_channel_id as usize - 1;
       if lci >= self.channels.len() {
         warn!("loading state containing channel id {} while we have {} channels. State of this channel will be lost on next save.", chst.local_channel_id, self.channels.len());
         // TODO: this is actually harmful for the UX

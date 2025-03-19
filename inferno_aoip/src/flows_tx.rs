@@ -17,11 +17,16 @@ use tokio::{select, sync::mpsc};
 
 use crate::os_utils::set_current_thread_realtime;
 use crate::protocol::mcast::mcast_packet::process;
+use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RBOutput};
+use crate::samples_utils::*;
 use crate::thread_utils::run_future_in_new_thread;
 use crate::{common::*, DeviceInfo};
-use crate::{media_clock::{ClockOverlay, MediaClock}, net_utils::MTU, protocol::flows_control::FlowHandle, Sample};
-use crate::samples_utils::*;
-use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RBOutput};
+use crate::{
+  media_clock::{ClockOverlay, MediaClock},
+  net_utils::MTU,
+  protocol::flows_control::FlowHandle,
+  Sample,
+};
 
 pub const FPP_MIN: u16 = 2;
 pub const FPP_MAX: u16 = 256;
@@ -60,14 +65,25 @@ impl Flow {
   }
 }
 
-
 #[derive(Debug)]
 enum Command {
   NoOp,
   Shutdown,
-  AddFlow { index: usize, socket: UdpSocket, channel_indices: Vec<Option<usize>>, fpp: usize, bytes_per_sample: usize, expired: Arc<AtomicBool> },
-  RemoveFlow { index: usize },
-  SetChannels { index: usize, channel_indices: Vec<Option<usize>> },
+  AddFlow {
+    index: usize,
+    socket: UdpSocket,
+    channel_indices: Vec<Option<usize>>,
+    fpp: usize,
+    bytes_per_sample: usize,
+    expired: Arc<AtomicBool>,
+  },
+  RemoveFlow {
+    index: usize,
+  },
+  SetChannels {
+    index: usize,
+    channel_indices: Vec<Option<usize>>,
+  },
   UpdateClockOverlay(ClockOverlay),
 }
 
@@ -98,7 +114,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     let max_lag_samples = MAX_LAG_SAMPLES;
     if let Some(now) = self.now() {
       let mut max_missing_samples = 0;
-      for flow in &mut self.flows.iter_mut().filter_map(|opt|opt.as_mut()) {
+      for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
         if flow.expired.load(Ordering::Relaxed) {
           continue;
         }
@@ -126,9 +142,14 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
             if let Some(ch_index) = ch_opt {
               //(self.callback)(flow.next_ts, ch_index, &mut tmp_samples[0..flow.fpp]);
               // TODO remove not really necessary copy to tmp_samples, write_*_samples could read directly from ring buffer
-              let r = self.channels_sources[ch_index].read_at(start_ts as usize, &mut tmp_samples[0..flow.fpp]);
+              let r =
+                self.channels_sources[ch_index].read_at(start_ts as usize, &mut tmp_samples[0..flow.fpp]);
               if r.useful_start_index != 0 || r.useful_end_index != flow.fpp {
-                error!("didn't have enough samples, transmitting silence. {} {}", r.useful_start_index, flow.fpp-r.useful_end_index);
+                error!(
+                  "didn't have enough samples, transmitting silence. {} {}",
+                  r.useful_start_index,
+                  flow.fpp - r.useful_end_index
+                );
 
                 tmp_samples[0..r.useful_start_index].fill(0);
                 tmp_samples[r.useful_end_index..].fill(0);
@@ -182,8 +203,10 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     if let Some(rx) = &mut start_time_rx {
       match rx.await {
         Ok(start_time) => {
-          self.timestamp_shift = (0 as ClockDiff).wrapping_sub_unsigned(start_time).wrapping_sub_unsigned(self.send_latency_samples.try_into().unwrap());
-        },
+          self.timestamp_shift = (0 as ClockDiff)
+            .wrapping_sub_unsigned(start_time)
+            .wrapping_sub_unsigned(self.send_latency_samples.try_into().unwrap());
+        }
         Err(e) => {
           error!("unable to get start timestamp for ring buffer output: {e:?}");
           return;
@@ -193,14 +216,26 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
 
     set_current_thread_realtime(81);
     loop {
-      let min_next_ts = self.flows.iter().filter_map(|opt|opt.as_ref()).filter(|flow|!flow.expired.load(Ordering::Relaxed)).map(|&ref flow|flow.next_ts).min_by(|&a, &b| wrapped_diff(a, b).cmp(&0));
-      let sleep_duration = min_next_ts.and_then(|ts|self.clock.system_clock_duration_until(ts, sample_rate as u64)).unwrap_or(std::time::Duration::from_secs(20)).max(MIN_SLEEP);
-      let mut process_events = (counter.0%32)==0;
+      let min_next_ts = self
+        .flows
+        .iter()
+        .filter_map(|opt| opt.as_ref())
+        .filter(|flow| !flow.expired.load(Ordering::Relaxed))
+        .map(|&ref flow| flow.next_ts)
+        .min_by(|&a, &b| wrapped_diff(a, b).cmp(&0));
+      let sleep_duration = min_next_ts
+        .and_then(|ts| self.clock.system_clock_duration_until(ts, sample_rate as u64))
+        .unwrap_or(std::time::Duration::from_secs(20))
+        .max(MIN_SLEEP);
+      let mut process_events = (counter.0 % 32) == 0;
       counter += 1;
 
       let command = if sleep_duration < SELECT_THRESHOLD {
-        let cur_ts_opt = min_next_ts.map(|n|n as usize).map(|n|if n==usize::MAX { usize::MAX-1 } else { n });
-        self.current_timestamp.store(cur_ts_opt.unwrap_or(usize::MAX), Ordering::SeqCst /*TODO: really needed?*/);
+        let cur_ts_opt =
+          min_next_ts.map(|n| n as usize).map(|n| if n == usize::MAX { usize::MAX - 1 } else { n });
+        self
+          .current_timestamp
+          .store(cur_ts_opt.unwrap_or(usize::MAX), Ordering::SeqCst /*TODO: really needed?*/);
         if !sleep_duration.is_zero() {
           std::thread::sleep(sleep_duration);
         }
@@ -226,19 +261,20 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       match command {
         Command::Shutdown => {
           break;
-        },
+        }
         Command::AddFlow { index, socket, channel_indices, fpp, bytes_per_sample, expired } => {
-          let mut flow = Flow { socket, channel_indices, next_ts: 0, fpp, bytes_per_sample, expires: 0, expired };
+          let mut flow =
+            Flow { socket, channel_indices, next_ts: 0, fpp, bytes_per_sample, expires: 0, expired };
           if let Some(now) = self.now() {
             flow.bootstrap_next_ts(now);
             flow.keep_alive(now, self.sample_rate);
           }
           let previous = std::mem::replace(&mut self.flows[index], Some(flow));
           debug_assert!(previous.is_none());
-        },
+        }
         Command::RemoveFlow { index } => {
           self.flows[index] = None; // TODO is freeing memory in realtime thread safe???
-        },
+        }
         Command::SetChannels { index, channel_indices } => {
           let now_opt = self.now();
           let flow = self.flows[index].as_mut().unwrap();
@@ -253,29 +289,28 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
             }
             flow.expired.store(false, Ordering::Release);
           }
-        },
+        }
         Command::UpdateClockOverlay(clkovl) => {
           let had_clock = self.clock.is_ready();
           self.clock.update_overlay(clkovl);
           if !had_clock {
             let now = self.now().unwrap();
-            for flow in &mut self.flows.iter_mut().filter_map(|opt|opt.as_mut()) {
+            for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
               flow.bootstrap_next_ts(now);
               flow.keep_alive(now, self.sample_rate);
             }
           }
-        },
+        }
         Command::NoOp => {}
       }
     }
   }
 }
 
-
 struct FlowData {
   cookie: u16,
   remote: SocketAddr,
-  expired: Arc<AtomicBool>
+  expired: Arc<AtomicBool>,
 }
 
 pub struct FlowsTransmitter {
@@ -283,7 +318,7 @@ pub struct FlowsTransmitter {
   flow_seq_id: AtomicU32,
   flows: BTreeMap<u32, FlowData>,
   ip_port_to_id: BTreeMap<SocketAddr, u32>,
-  commands_sender: mpsc::Sender<Command>
+  commands_sender: mpsc::Sender<Command>,
 }
 
 fn split_handle(h: FlowHandle) -> (u32, u16) {
@@ -291,17 +326,27 @@ fn split_handle(h: FlowHandle) -> (u32, u16) {
 }
 
 impl FlowsTransmitter {
-  async fn run<P: ProxyToSamplesBuffer>(rx: mpsc::Receiver<Command>, sample_rate: u32, latency_ns: usize, channels_outputs: Vec<RBOutput<Sample, P>>, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, current_timestamp: Arc<AtomicUsize>, on_transfer: Option<Box<dyn Fn() + Send>>) {
+  async fn run<P: ProxyToSamplesBuffer>(
+    rx: mpsc::Receiver<Command>,
+    sample_rate: u32,
+    latency_ns: usize,
+    channels_outputs: Vec<RBOutput<Sample, P>>,
+    start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
+    current_timestamp: Arc<AtomicUsize>,
+    on_transfer: Option<Box<dyn Fn() + Send>>,
+  ) {
     let latency: u32 = (latency_ns as u64 * sample_rate as u64 / 1_000_000_000u64).try_into().unwrap();
     let mut internal = FlowsTransmitterInternal {
       commands_receiver: rx,
       sample_rate,
-      flows: (0..MAX_FLOWS).map(|_|None).collect_vec(),
+      flows: (0..MAX_FLOWS).map(|_| None).collect_vec(),
       clock: MediaClock::new(),
       channels_sources: channels_outputs,
       send_latency_samples: latency.try_into().unwrap(), // TODO in ALSA plugin should be 0, the more the worse because aplay wants to fill the whole buffer
       timestamp_shift: (0 as ClockDiff).wrapping_sub_unsigned(latency.try_into().unwrap()),
-      clock_offset_samples: (CLOCK_OFFSET_NS as i64 * sample_rate as i64 / 1_000_000_000i64).try_into().unwrap(),
+      clock_offset_samples: (CLOCK_OFFSET_NS as i64 * sample_rate as i64 / 1_000_000_000i64)
+        .try_into()
+        .unwrap(),
       current_timestamp,
       on_transfer,
       /* callback: Box::new(|mut timestamp: Clock, ch_index: usize, buffer: &mut [Sample]| {
@@ -315,7 +360,14 @@ impl FlowsTransmitter {
     };
     internal.run(start_time_rx).await;
   }
-  pub fn start<P: ProxyToSamplesBuffer + Send + Sync + 'static>(self_info: Arc<DeviceInfo>, mut media_clock_receiver: watch::Receiver<Option<ClockOverlay>>, channels_outputs: Vec<RBOutput<Sample, P>>, start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>, current_timestamp: Arc<AtomicUsize>, on_transfer: Option<Box<dyn Fn() + Send>>) -> (Self, JoinHandle<()>) {
+  pub fn start<P: ProxyToSamplesBuffer + Send + Sync + 'static>(
+    self_info: Arc<DeviceInfo>,
+    mut media_clock_receiver: watch::Receiver<Option<ClockOverlay>>,
+    channels_outputs: Vec<RBOutput<Sample, P>>,
+    start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
+    current_timestamp: Arc<AtomicUsize>,
+    on_transfer: Option<Box<dyn Fn() + Send>>,
+  ) -> (Self, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(100);
     let tx1 = tx.clone();
     tokio::spawn(async move {
@@ -327,29 +379,49 @@ impl FlowsTransmitter {
           }
         }
         match media_clock_receiver.changed().await {
-          Ok(()) => {},
+          Ok(()) => {}
           Err(_) => {
             break;
-          },
+          }
         }
       }
     });
     let srate = self_info.sample_rate;
     // TODO dehardcode latency_ns
-    let thread_join = run_future_in_new_thread("flows TX", move || Self::run(rx, srate, 0 /*LATENCY TODO*/, channels_outputs, start_time_rx, current_timestamp, on_transfer).boxed_local());
-    return (Self {
-      commands_sender: tx,
-      self_info: self_info.clone(),
-      flow_seq_id: 0.into(),
-      flows: BTreeMap::new(),
-      ip_port_to_id: BTreeMap::new()
-    }, thread_join);
+    let thread_join = run_future_in_new_thread("flows TX", move || {
+      Self::run(
+        rx,
+        srate,
+        0, /*LATENCY TODO*/
+        channels_outputs,
+        start_time_rx,
+        current_timestamp,
+        on_transfer,
+      )
+      .boxed_local()
+    });
+    return (
+      Self {
+        commands_sender: tx,
+        self_info: self_info.clone(),
+        flow_seq_id: 0.into(),
+        flows: BTreeMap::new(),
+        ip_port_to_id: BTreeMap::new(),
+      },
+      thread_join,
+    );
   }
   pub async fn shutdown(&self) {
     self.commands_sender.send(Command::Shutdown).await.log_and_forget();
   }
 
-  pub async fn add_flow(&mut self, dst_addr: SocketAddr, channel_indices: impl IntoIterator<Item=Option<usize>>, fpp: usize, bytes_per_sample: usize) -> Result<(usize, FlowHandle), std::io::Error> {
+  pub async fn add_flow(
+    &mut self,
+    dst_addr: SocketAddr,
+    channel_indices: impl IntoIterator<Item = Option<usize>>,
+    fpp: usize,
+    bytes_per_sample: usize,
+  ) -> Result<(usize, FlowHandle), std::io::Error> {
     let (flow_number, cookie) = match self.ip_port_to_id.get(&dst_addr) {
       None => {
         self.scan_expired().await;
@@ -368,30 +440,48 @@ impl FlowsTransmitter {
         let flow = FlowData {
           cookie: thread_rng().gen(),
           remote: dst_addr.clone(),
-          expired: Arc::new(AtomicBool::new(false))
+          expired: Arc::new(AtomicBool::new(false)),
         };
-        
+
         let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(self.self_info.ip_address), 0))?;
         socket.connect(dst_addr)?;
         socket.set_nonblocking(true)?;
         //socket.set_read_timeout(Some(Duration::from_micros(1)))?;
-        
-        self.commands_sender.send(Command::AddFlow { index: flow_number as usize, socket, channel_indices: channel_indices.into_iter().collect_vec(), fpp, bytes_per_sample, expired: flow.expired.clone() }).await.unwrap();
+
+        self
+          .commands_sender
+          .send(Command::AddFlow {
+            index: flow_number as usize,
+            socket,
+            channel_indices: channel_indices.into_iter().collect_vec(),
+            fpp,
+            bytes_per_sample,
+            expired: flow.expired.clone(),
+          })
+          .await
+          .unwrap();
 
         let cookie = flow.cookie;
         self.flows.insert(flow_number, flow);
         (flow_number, cookie)
-      },
+      }
       Some(&flow_number) => {
         warn!("got add flow request for already existing flow, setting channels instead");
         // TODO FIXME what if fpp or bytes_per_sample change?
-        self.commands_sender.send(Command::SetChannels { index: flow_number as usize, channel_indices: channel_indices.into_iter().collect_vec() }).await.unwrap();
+        self
+          .commands_sender
+          .send(Command::SetChannels {
+            index: flow_number as usize,
+            channel_indices: channel_indices.into_iter().collect_vec(),
+          })
+          .await
+          .unwrap();
         (flow_number, self.flows.get(&flow_number).unwrap().cookie)
       }
     };
 
     self.ip_port_to_id.insert(dst_addr, flow_number);
-    
+
     let mut flow_handle = [0u8; 6];
     flow_handle[0..4].copy_from_slice(&flow_number.to_be_bytes());
     flow_handle[4..6].copy_from_slice(&cookie.to_be_bytes());
@@ -416,23 +506,38 @@ impl FlowsTransmitter {
       Err(std::io::Error::from(std::io::ErrorKind::NotFound))
     }
   }
-  pub async fn set_channels(&mut self, handle: FlowHandle, channel_indices: impl IntoIterator<Item=Option<usize>>) -> Result<usize, std::io::Error> {
+  pub async fn set_channels(
+    &mut self,
+    handle: FlowHandle,
+    channel_indices: impl IntoIterator<Item = Option<usize>>,
+  ) -> Result<usize, std::io::Error> {
     if let Some((id, _)) = self.get_flow(handle) {
-      self.commands_sender.send(Command::SetChannels { index: id as usize, channel_indices: channel_indices.into_iter().collect_vec() }).await.unwrap();
+      self
+        .commands_sender
+        .send(Command::SetChannels {
+          index: id as usize,
+          channel_indices: channel_indices.into_iter().collect_vec(),
+        })
+        .await
+        .unwrap();
       Ok(id as usize)
     } else {
       Err(std::io::Error::from(std::io::ErrorKind::NotFound))
     }
   }
   async fn scan_expired(&mut self) {
-    let expired_ids: Vec<u32> = self.flows.iter().filter_map(|(id, flow)| {
-      if flow.expired.load(Ordering::Acquire) {
-        info!("removing expired flow (internal id {id}) dst {}", flow.remote);
-        Some(*id)
-      } else {
-        None
-      }
-    }).collect_vec();
+    let expired_ids: Vec<u32> = self
+      .flows
+      .iter()
+      .filter_map(|(id, flow)| {
+        if flow.expired.load(Ordering::Acquire) {
+          info!("removing expired flow (internal id {id}) dst {}", flow.remote);
+          Some(*id)
+        } else {
+          None
+        }
+      })
+      .collect_vec();
     for id in expired_ids {
       self.remove_flow_internal(id).await;
     }
