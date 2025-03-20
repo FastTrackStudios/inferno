@@ -203,9 +203,25 @@ At this point, Inferno will roughly become alternative to Dante Virtual Soundcar
 # Motivation
 I've been using free as in freedom, open source software for many years now. I'm also fascinated by connections between music and technology. One day my sound engineer collegue showed me how Dante works, how easy to use and (most of the time) stable it is. The problem was that it's not an open standard, didn't have open source implementation and I couldn't use it on my favourite operating system - Linux. Now I can.
 
+## Why not AES67?
+* AES67 is only a standard of media transport, not control, so flows need to be established manually. NMOS could fix it but I doubt Audinate will implement it in reasonable future.
+
+And the following are limitations of AES67 implementation in Dante, not AES67 in general:
+
+* it is not supported in Dante Virtual Soundcard and Dante Via
+* some older Dante devices (without firmware upgrades) don't support it either
+* it is multicast-only
+* sample rate is locked to 48kHz
 
 # Other open source projects related to Dante
 * [network-audio-controller](https://github.com/chris-ritsen/network-audio-controller) - command line connection and device controller, alternative to Dante Controller
 * [dante-aes67-relay.js](https://gist.github.com/philhartung/87d336a3c432e2ce5452befcad1b945f) - Relay a Dante multicast stream to AES67
 * [wycliffe](https://github.com/jsharkey/wycliffe), receiver implementation contained in a video control software
 * [List of AES67 audio resources](https://aes67.app/resources) at [AES67 Stream Monitor](https://aes67.app/) website (Dante is AES67-compatible but not on all devices and requires manual configuration)
+
+## Alternatives
+To my knowledge, there are no other unofficial implementations of audio transmission compatible with Dante. However, if AES67 fits your use case, you may want to use:
+* [AES67 Linux daemon](https://github.com/bondagit/aes67-linux-daemon) with kernel-level virtual soundcard
+* [pipewire-aes67](https://gitlab.freedesktop.org/pipewire/pipewire/-/wikis/AES67)
+* [aes67-recorder](https://github.com/voc/aes67-recorder) ([tutorial for usage with Dante](https://behringer.world/viewtopic.php?t=197))
+* AES67 can be also received by any software that supports raw audio in RTP packets, e.g. FFmpeg or GStreamer.
