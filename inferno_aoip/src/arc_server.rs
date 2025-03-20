@@ -9,10 +9,12 @@ use crate::info_mcast_server::MulticastMessage;
 use crate::mdns_server::DeviceMDNSResponder;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::mcast::make_channel_change_notification;
-use crate::protocol::req_resp;
+use crate::protocol::req_resp::{self, CODE_OK};
 use crate::protocol::req_resp::HEADER_LENGTH;
+use crate::protocol::proto_arc::*;
 use crate::state_storage::{SavedChannelsSettings, StateStorage};
 use crate::utils::LogAndForget;
+use binrw::BinWrite;
 use bytebuffer::{ByteBuffer, Endian};
 use log::{error, info, trace};
 use std::sync::RwLock;
@@ -49,48 +51,24 @@ pub async fn run_server(
 
     if request.opcode2().read() == 0 {
       match request.opcode1().read() {
-        0x1000 => {
-          let txnum = self_info.tx_channels.len() as u16;
-          let rxnum = self_info.rx_channels.len() as u16;
-          let total_channels_wtf = txnum + rxnum; // ??? not actually total number of channels but in some devices it is
-          conn
-            .respond(&[
-              0,    // was 0x05 but then no channel and flows are shown
-              0x10, // was 0xf9, 0x10 = supports TX channel renames
-              H(txnum),
-              L(txnum),
-              H(rxnum),
-              L(rxnum),
-              0x00,
-              0x04, // was 4, or 1...
-              0x00,
-              0x04, // was 4, or 8...
-              0x00,
-              0x08, // was 8
-              H(MAX_TX_FLOWS as _),
-              L(MAX_TX_FLOWS as _),
-              H(MAX_RX_FLOWS as _), // max receive flows MSB
-              L(MAX_RX_FLOWS as _), // max receive flows LSB
-              H(total_channels_wtf as _),
-              L(total_channels_wtf as _), // was 4, 0 also occurs in some devices
-              0x00,
-              0x01, // was 1
-              0x00,
-              0x01, // if 0, DC doesn't recognize RX channels
-              0x00,
-              0x00,
-              0x00,
-              0x00,
-              0x00,
-              0x00,
-              0x00,
-              0x00,
-              0x00,
-              0x00,
-              0x00,
-              0x00,
-            ])
-            .await;
+        channels_and_flows_count::OPCODE => {
+          let total_channels_wtf = self_info.tx_channels.len() + self_info.rx_channels.len(); // ??? not actually total number of channels but in some devices it is
+          let response = channels_and_flows_count::Response {
+            unknown1_0: 0,
+            flags1: channels_and_flows_count::Flags1::new().with_supports_tx_channel_rename(true),
+            tx_channels_count: self_info.tx_channels.len().try_into().unwrap(),
+            rx_channels_count: self_info.rx_channels.len().try_into().unwrap(),
+            unknown2_4: 4, // or 1
+            unknown3_4: 4, // or 8
+            unknown4_8: 8,
+            max_tx_flows: MAX_TX_FLOWS.try_into().unwrap(),
+            max_rx_flows: MAX_RX_FLOWS.try_into().unwrap(),
+            unknown5_total_channels: total_channels_wtf.try_into().unwrap(),
+            unknown6_1: 1,
+            unknown7_1: 1,
+            unknown8_0: [0; 6],
+          };
+          conn.respond_with_struct(CODE_OK, &response).await;
         }
         0x1002 => {
           // device name (used by network-audio-controller)

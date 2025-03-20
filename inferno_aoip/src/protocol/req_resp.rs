@@ -1,12 +1,14 @@
 use crate::common::*;
 use binary_layout::prelude::*;
-use std::borrow::BorrowMut;
+use binrw::BinWrite;
+use std::{borrow::BorrowMut, io::Cursor};
 use std::net::SocketAddr;
 
 use crate::net_utils::{UdpSocketWrapper, MTU};
 
 pub const HEADER_LENGTH: usize = 10;
 const SEND_BUFFER_SIZE: usize = MTU;
+pub const CODE_OK: u16 = 1;
 
 define_layout!(req_resp_packet, BigEndian, {
   start_code: u16,
@@ -95,8 +97,14 @@ impl Connection {
     self.server.send(&dst, pkt).await;
   }
 
-  pub async fn respond(&mut self, content: &[u8]) {
-    self.respond_with_code(1, content).await;
+  pub async fn respond(&mut self, payload: &[u8]) {
+    self.respond_with_code(1, payload).await;
+  }
+  pub async fn respond_with_struct<B: BinWrite>(&mut self, code: u16, payload: B)
+    where for<'a> <B as BinWrite>::Args<'a>: std::default::Default {
+    let mut output = Cursor::new(vec![]);
+    payload.write_be(&mut output).expect("failed to serialize packet, something is wrong");
+    self.respond_with_code(code, &output.into_inner()).await;
   }
   pub async fn respond_with_code(&mut self, opcode2: u16, content: &[u8]) {
     let rem = self.remote.as_ref().unwrap();
