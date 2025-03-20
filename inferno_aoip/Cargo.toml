@@ -36,8 +36,7 @@ bytemuck = "1.17.1"
 usrvclock = { path = "../usrvclock-rs" }
 arrayvec = "0.7.6"
 netdev = "0.32.0"
-binrw = "0.14.1"
-modular-bitfield = "0.11.2"
+binary_serde = { version = "1.0.24", features = ["std"] }
 
 [dependencies.serde]
 version = "1.0.159"

@@ -106,6 +106,7 @@ fn create_self_info(
     gateway,
     mac_address,
     link_speed: speed.clamp(0, 10000).try_into().unwrap(),
+    
     board_name: "Inferno-AoIP".to_owned(),
     manufacturer: "Inferno-AoIP".to_owned(),
     model_name: app_name.to_owned(),

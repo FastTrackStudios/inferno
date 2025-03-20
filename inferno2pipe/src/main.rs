@@ -49,6 +49,7 @@ async fn main() {
 
     let mut settings = Settings::new("Inferno2pipe", "Inferno2pipe", None, &Default::default());
     settings.make_rx_channels(ch_count);
+    settings.make_tx_channels(0);
 
     let mut output_file = File::create(args.output).unwrap();
     let mut buffer: Vec<u8> =

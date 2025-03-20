@@ -3,6 +3,8 @@ use std::error::Error;
 use std::io;
 use std::str;
 
+use bytebuffer::ByteBuffer;
+
 pub fn H(u: u16) -> u8 {
   return (u >> 8) as u8;
 }
@@ -17,6 +19,13 @@ pub fn make_u16(h: u8, l: u8) -> u16 {
 pub fn write_str_to_buffer(buffer: &mut [u8], offset: usize, max_len: usize, s: &str) {
   let len = min(max_len, s.len());
   buffer[offset..offset + len].clone_from_slice(&s.as_bytes()[0..len]);
+}
+
+pub fn write_0term_str_to_bytebuffer(bytes: &mut ByteBuffer, s: &str) -> u16 {
+  let offset = bytes.get_wpos();
+  bytes.write_bytes(s.as_bytes());
+  bytes.write_u8(0);
+  return offset.try_into().unwrap();
 }
 
 pub fn read_0term_str_from_buffer(buffer: &[u8], offset: usize) -> Result<&str, Box<dyn Error>> {

@@ -14,7 +14,8 @@ use crate::protocol::req_resp::HEADER_LENGTH;
 use crate::protocol::proto_arc::*;
 use crate::state_storage::{SavedChannelsSettings, StateStorage};
 use crate::utils::LogAndForget;
-use binrw::BinWrite;
+use binary_serde::recursive_array::RecursiveArray as _;
+use binary_serde::BinarySerde;
 use bytebuffer::{ByteBuffer, Endian};
 use log::{error, info, trace};
 use std::sync::RwLock;
@@ -51,11 +52,12 @@ pub async fn run_server(
 
     if request.opcode2().read() == 0 {
       match request.opcode1().read() {
+
         channels_and_flows_count::OPCODE => {
           let total_channels_wtf = self_info.tx_channels.len() + self_info.rx_channels.len(); // ??? not actually total number of channels but in some devices it is
           let response = channels_and_flows_count::Response {
             unknown1_0: 0,
-            flags1: channels_and_flows_count::Flags1::new().with_supports_tx_channel_rename(true),
+            flags2: channels_and_flows_count::Flags2 { supports_tx_channel_rename: true, ..Default::default() },
             tx_channels_count: self_info.tx_channels.len().try_into().unwrap(),
             rx_channels_count: self_info.rx_channels.len().try_into().unwrap(),
             unknown2_4: 4, // or 1
@@ -68,132 +70,99 @@ pub async fn run_server(
             unknown7_1: 1,
             unknown8_0: [0; 6],
           };
-          conn.respond_with_struct(CODE_OK, &response).await;
+          conn.respond_with_struct(CODE_OK, response).await;
         }
-        0x1002 => {
+
+        GET_DEVICE_NAME_OPCODE => {
           // device name (used by network-audio-controller)
           let mut buff = ByteBuffer::new();
           buff.write_bytes(self_info.friendly_hostname.as_bytes());
           buff.write_u8(0);
           conn.respond(buff.as_bytes()).await;
         }
-        0x1003 => {
-          // hostname, board name, factory names:
-          let mut content = [
-            0x00, 0x00, 0x00, 0, /*was 0x14*/
-            0x00, 0, /*was 0x20*/
-            /* offset of board name: */ 0x00, 0x70,
-            /* offset of :70{2,5} (revision string?) */ 0x00, 0x90, 0, /*was 5*/
-            0x00, /* offset of friendly host name: */ 0x00, 0x30,
-            /* offset of factory host name: */ 0x00, 0x50,
-            /* offset of friendly host name again: */ 0x00, 0x30, 0x00, 0x00, 0x00, 0x00,
-            0, /*was 4*/
-            0x00, 0x00, 0x00, 0, /*was 4*/
-            0x00, 0, /*was 2*/
-            /* for :705, 1 for :702 */
-            0x00, /* start code: */ 0x27, 0x29, 0, /*was 2*/
-            0, /*was 4*/
-            /* opcode of some other request: */ 0x11, 0x02, 0, /*was 0x10*/
-            0, /*was 4*/
-            /* friendly host name: */
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, /* factory host name: */
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, /* board name: */
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* :70{2,5} */
-            0x3a, 0x37, 0x30, 0x35, 0x00,
-          ];
-          let HOST_NAMES_MAXLEN = 0x20 - 1;
-          let BOARD_NAME_MAXLEN = 23;
-          write_str_to_buffer(
-            &mut content,
-            0x30 - HEADER_LENGTH,
-            HOST_NAMES_MAXLEN,
-            &self_info.friendly_hostname,
-          );
-          write_str_to_buffer(
-            &mut content,
-            0x50 - HEADER_LENGTH,
-            HOST_NAMES_MAXLEN,
-            &self_info.factory_hostname,
-          );
-          write_str_to_buffer(
-            &mut content,
-            0x70 - HEADER_LENGTH,
-            BOARD_NAME_MAXLEN,
-            &self_info.board_name,
-          );
-          conn.respond(&content).await;
+
+        get_device_names::OPCODE => {
+          let mut bytes = ByteBuffer::new();
+          let strings_offset = HEADER_LENGTH;
+          bytes.write_bytes(&[0u8; get_device_names::ResponseHeader::SERIALIZED_SIZE]);
+          let friendly_hostname_offset = (bytes.get_wpos() + strings_offset).try_into().unwrap();
+          bytes.write_bytes(self_info.friendly_hostname.as_bytes());
+          bytes.write_u8(0);
+          let factory_hostname_offset = (bytes.get_wpos() + strings_offset).try_into().unwrap();
+          bytes.write_bytes(self_info.factory_hostname.as_bytes());
+          bytes.write_u8(0);
+          let board_name_offset = (bytes.get_wpos() + strings_offset).try_into().unwrap();
+          bytes.write_bytes(self_info.board_name.as_bytes());
+          bytes.write_u8(0);
+          let revision_string_offset = (bytes.get_wpos() + strings_offset).try_into().unwrap();
+          bytes.write_bytes(b":705\0");
+
+          let response = get_device_names::ResponseHeader {
+            board_name_offset,
+            revision_string_offset,
+            friendly_hostname_offset1: friendly_hostname_offset,
+            factory_hostname_offset,
+            friendly_hostname_offset2: friendly_hostname_offset,
+            start_code: 0x2729,
+            unknown_opcode_1102: 0x1102,
+            ..Default::default()
+          };
+          bytes.set_wpos(0);
+          bytes.write_bytes(response.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+          conn.respond(&bytes.as_bytes()).await;
         }
 
-        0x3000 => {
+        get_receive_channels::OPCODE => {
           // Dante Receivers names and subscriptions:
           let content = request.content();
           let start_index = make_u16(content[2], content[3]) - 1;
-          let remaining = if subscriber.is_some() {
-            self_info.rx_channels.len().saturating_sub(start_index as usize)
-          } else {
-            0
-          };
-          let limit = 20; // TODO
-          let in_this_response = min(limit, remaining);
-          trace!("returning {in_this_response} rx channels starting with index {start_index}");
-          let mut response = ByteBuffer::new();
-          response.set_endian(Endian::BigEndian);
-          response.write_u8(in_this_response as u8);
-          response.write_u8(in_this_response as u8); // number of channels in this response(?)
-          let common_descr_offset = HEADER_LENGTH + 2 + in_this_response * 20;
-          let strings_offset = common_descr_offset + 16;
-          let mut strings = ByteBuffer::new();
-          for (i, ch) in
-            self_info.rx_channels.iter().enumerate().skip(start_index as usize).take(in_this_response)
-          {
-            response.write_u16((i + 1) as u16); // channel id
-            response.write_u16(6); // ???
-            response.write_u16(common_descr_offset as u16);
-            let status = subscriber.as_ref().unwrap().channel_status(i);
-            let (tx_ch_offset, tx_host_offset) = match &status {
-              None => (0, 0),
-              Some(status) => {
-                let tx_ch_offset = (strings.get_wpos() + strings_offset) as u16;
-                strings.write_bytes(status.tx_channel_name.as_bytes());
-                strings.write_u8(0);
-                let tx_host_offset = (strings.get_wpos() + strings_offset) as u16;
-                strings.write_bytes(status.tx_hostname.as_bytes());
-                strings.write_u8(0);
-                (tx_ch_offset, tx_host_offset)
+
+          let mut common_descriptor_offset: u16 = 0;
+          let (have_more, payload) = serialize_items(
+            if subscriber.is_some() { self_info.rx_channels.len().min(32).try_into().unwrap() } else { 0 },
+            self_info.rx_channels.iter().enumerate().skip(start_index.into()),
+            |(channel_index, ch), bytes| {
+              if common_descriptor_offset == 0 {
+                let descr = get_receive_channels::CommonDescriptor {
+                  sample_rate: self_info.sample_rate,
+                  unknown1_1: 1,
+                  unknown2_1: 1,
+                  bits_per_sample_1: self_info.bits_per_sample.into(),
+                  unknown3_400: 0x400,
+                  bits_per_sample_2: self_info.bits_per_sample.into(),
+                  bits_per_sample_3: self_info.bits_per_sample.into(),
+                  pcm_type: self_info.pcm_type.into(),
+                };
+                common_descriptor_offset = bytes.get_wpos().try_into().unwrap();
+                bytes.write_bytes(descr.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
               }
-            };
-            response.write_u16(tx_ch_offset);
-            response.write_u16(tx_host_offset);
-            response.write_u16((strings.get_wpos() + strings_offset) as u16);
-            strings.write_bytes(ch.friendly_name.read().unwrap().as_bytes());
-            strings.write_u8(0);
-            let status_value: u32 = match &status {
-              None => 0,
-              Some(ss) => ss.status as u32,
-            };
-            response.write_u32(status_value); // subscription status, TODO. 0x01010009 if subscribed currently, 0x00000001 if not found but remembers subscription or in progress
-            response.write_u32(0); // ???
-          }
-          response.write_u32(self_info.sample_rate);
-          response.write_bytes(&[
-            0x01,
-            0x01,
-            0x00,
-            0x18,
-            0x04,
-            0x00,
-            0x00,
-            0x18,
-            0x00,
-            0x18,
-            0x00,
-            self_info.pcm_type,
-          ]);
-          response.write_bytes(strings.as_bytes());
-          let code = if remaining > in_this_response { 0x8112 } else { 1 };
-          conn.respond_with_code(code, response.as_bytes()).await;
+              let status = subscriber.as_ref().unwrap().channel_status(channel_index);
+              let (tx_channel_name_offset, tx_hostname_offset) = match &status {
+                None => (0, 0),
+                Some(status) => (
+                  write_0term_str_to_bytebuffer(bytes, &status.tx_channel_name),
+                  write_0term_str_to_bytebuffer(bytes, &status.tx_hostname),
+                )
+              };
+              let status_value: u32 = match &status {
+                None => 0,
+                Some(ss) => ss.status as u32,
+              };
+              get_receive_channels::ChannelDescriptor {
+                channel_id: (channel_index + 1).try_into().unwrap(),
+                unknown1_6: 6,
+                common_descriptor_offset,
+                tx_channel_name_offset,
+                tx_hostname_offset,
+                friendly_name_offset: write_0term_str_to_bytebuffer(bytes, &ch.friendly_name.read().unwrap()),
+                subscription_status: status_value,
+                unknown2_0: 0,
+              }
+            }
+          );
+
+          let code = if have_more { 0x8112 } else { 1 };
+          conn.respond_with_code(code, &payload).await;
         }
 
         0x2000 => {
