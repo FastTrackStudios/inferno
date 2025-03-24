@@ -7,6 +7,17 @@ pub const MTU: usize = 1500;
 const PACKET_BUFFER_SIZE: usize = MTU;
 pub const MAX_PAYLOAD_BYTES: usize = 1400; // ???
 
+
+pub struct ReceiveBuffer {
+  buff: [u8; PACKET_BUFFER_SIZE],
+}
+
+impl ReceiveBuffer {
+  pub fn new() -> Self {
+    Self { buff: [0u8; PACKET_BUFFER_SIZE] }
+  }
+}
+
 pub struct UdpSocketWrapper {
   socket: Option<UdpSocket>,
   listen_addr: Ipv4Addr,
@@ -46,7 +57,7 @@ impl UdpSocketWrapper {
     self.listen_port
   }
 
-  pub async fn recv(&mut self) -> Option<(SocketAddr, &[u8])> {
+  pub async fn recv<'a>(&mut self, recv_buff: &'a mut ReceiveBuffer) -> Option<(SocketAddr, &'a [u8])> {
     let socket = match &self.socket {
       Some(s) => s,
       None => {
@@ -54,10 +65,10 @@ impl UdpSocketWrapper {
       }
     };
     select! {
-      r = socket.recv_from(&mut self.recv_buff) => {
+      r = socket.recv_from(&mut recv_buff.buff) => {
         match r {
           Ok((len_recv, src)) => {
-            return Some((src, &self.recv_buff[..len_recv]));
+            return Some((src, &recv_buff.buff[..len_recv]));
           },
           Err(e) => {
             error!("error receiving from socket: {e:?}");
@@ -72,7 +83,7 @@ impl UdpSocketWrapper {
     };
   }
 
-  pub async fn send(&mut self, dst: &SocketAddr, packet: &[u8]) {
+  pub async fn send(&self, dst: &SocketAddr, packet: &[u8]) {
     let socket = match &self.socket {
       Some(s) => s,
       None => {

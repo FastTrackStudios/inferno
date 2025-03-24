@@ -5,7 +5,7 @@ use binary_serde::BinarySerde;
 use std::{borrow::BorrowMut, io::Cursor};
 use std::net::SocketAddr;
 
-use crate::net_utils::{UdpSocketWrapper, MTU};
+use crate::net_utils::{ReceiveBuffer, UdpSocketWrapper, MTU};
 
 pub const HEADER_LENGTH: usize = 10;
 const SEND_BUFFER_SIZE: usize = MTU;
@@ -64,8 +64,8 @@ impl Connection {
     return self.server.should_work();
   }
 
-  pub async fn recv(&mut self) -> Option<req_resp_packet::View<&[u8]>> {
-    let (src, request_buf) = match self.server.borrow_mut().recv().await {
+  pub async fn recv<'a>(&mut self, recv_buff: &'a mut ReceiveBuffer) -> Option<req_resp_packet::View<&'a [u8]>> {
+    let (src, request_buf) = match self.server.borrow_mut().recv(recv_buff).await {
       Some(v) => v,
       None => {
         return None;

@@ -1,5 +1,5 @@
 use crate::channels_subscriber::ChannelsSubscriber;
-use crate::byte_utils::*;
+use crate::{byte_utils::*, net_utils};
 
 use crate::device_info::DeviceInfo;
 use crate::flows_control_server::FlowInfo as TXFlowInfo;
@@ -35,13 +35,14 @@ pub async fn run_server(
 ) {
   let mut subscriber = None;
   let mut saved_channels = SavedChannelsSettings::load(state_storage, self_info.clone());
-  for (index, txch) in self_info.tx_channels.iter().enumerate() {
+  for (index, _) in self_info.tx_channels.iter().enumerate() {
     mdns_server.add_tx_channel(index);
   }
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.arc_port, shutdown).await;
   let mut conn = req_resp::Connection::new(server);
+  let mut recv_buff = net_utils::ReceiveBuffer::new();
   while conn.should_work() {
-    let request = match conn.recv().await {
+    let request = match conn.recv(&mut recv_buff).await {
       Some(v) => v,
       None => continue,
     };
@@ -114,13 +115,13 @@ pub async fn run_server(
 
         get_receive_channels::OPCODE => {
           // Dante Receivers names and subscriptions:
-          let content = request.content();
-          let start_index = make_u16(content[2], content[3]) - 1;
 
           let mut common_descriptor_offset: u16 = 0;
-          let (have_more, payload) = serialize_items(
+          paginate_respond(
+            &mut conn,
+            request.content(),
             if subscriber.is_some() { self_info.rx_channels.len().min(32).try_into().unwrap() } else { 0 },
-            self_info.rx_channels.iter().enumerate().skip(start_index.into()),
+            self_info.rx_channels.iter().enumerate(),
             |(channel_index, ch), bytes| {
               if common_descriptor_offset == 0 {
                 let descr = get_receive_channels::CommonDescriptor {
@@ -159,10 +160,7 @@ pub async fn run_server(
                 unknown2_0: 0,
               }
             }
-          );
-
-          let code = if have_more { 0x8112 } else { 1 };
-          conn.respond_with_code(code, &payload).await;
+          ).await;
         }
 
         0x2000 => {

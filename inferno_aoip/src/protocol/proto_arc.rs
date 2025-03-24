@@ -1,7 +1,10 @@
 use binary_serde::BinarySerde;
 use bytebuffer::ByteBuffer;
+use log::error;
 
-use super::req_resp::HEADER_LENGTH;
+use crate::byte_utils::make_u16;
+
+use super::req_resp::{Connection, HEADER_LENGTH};
 
 
 pub const PACKET_SIZE_SOFT_LIMIT: usize = 800;
@@ -107,6 +110,9 @@ pub fn serialize_items<InItem, OutItem>(
   bytes.write_bytes(&[0u8; HEADER_LENGTH]);
   bytes.write_u8(space_items);
   bytes.write_u8(0);
+  if space_items == 0 {
+    return (false, bytes.as_bytes()[HEADER_LENGTH..].into());
+  }
   let space_items: usize = space_items.into();
   bytes.write_bytes(&vec![0u8; space_items*OutItem::SERIALIZED_SIZE]);
   
@@ -137,4 +143,29 @@ pub fn serialize_items<InItem, OutItem>(
   bytes.set_wpos(1 + HEADER_LENGTH);
   bytes.write_u8(actual_items.try_into().unwrap());
   (have_more, bytes.as_bytes()[HEADER_LENGTH..].into())
+}
+
+pub fn extract_start_index(request_payload: &[u8]) -> Option<usize> {
+  if request_payload.len() < 4 || (request_payload[2]|request_payload[3])==0 {
+    error!("got invalid paginate request, payload: {request_payload:?}");
+    return None;
+  }
+  Some((make_u16(request_payload[2], request_payload[3]) - 1).into())
+}
+
+pub async fn paginate_respond<InItem, OutItem>(
+  connection: &mut Connection,
+  request_payload: &[u8],
+  space_items: u8,
+  source: impl IntoIterator<Item = InItem>,
+  transform: impl FnMut(InItem, &mut ByteBuffer) -> OutItem
+)
+  where OutItem: BinarySerde {
+  let start_index = match extract_start_index(request_payload) {
+    Some(v) => v,
+    None => return
+  };
+  let (have_more, bytes) = serialize_items(space_items, source.into_iter().skip(start_index), transform);
+  let code = if have_more { 0x8112 } else { 1 };
+  connection.respond_with_code(code, &bytes).await;
 }

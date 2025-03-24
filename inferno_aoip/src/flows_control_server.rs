@@ -31,6 +31,7 @@ pub async fn run_server(
   let server =
     UdpSocketWrapper::new(Some(self_info.ip_address), self_info.flows_control_port, shutdown).await;
   let mut conn = req_resp::Connection::new(server);
+  let mut recv_buff = crate::net_utils::ReceiveBuffer::new();
   assert!(flows.is_empty());
   {
     let mut flows_info = flows_info.write().unwrap();
@@ -38,7 +39,7 @@ pub async fn run_server(
     flows_info.extend((0..MAX_FLOWS).map(|_| None));
   }
   while conn.should_work() {
-    let request = match conn.recv().await {
+    let request = match conn.recv(&mut recv_buff).await {
       Some(v) => v,
       None => continue,
     };

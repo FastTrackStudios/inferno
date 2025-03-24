@@ -10,8 +10,9 @@ use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 pub async fn run_server(self_info: Arc<DeviceInfo>, shutdown: BroadcastReceiver<()>) {
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.cmc_port, shutdown).await;
   let mut conn = req_resp::Connection::new(server);
+  let mut recv_buff = crate::net_utils::ReceiveBuffer::new();
   while conn.should_work() {
-    let request = match conn.recv().await {
+    let request = match conn.recv(&mut recv_buff).await {
       Some(v) => v,
       None => continue,
     };
@@ -20,7 +21,7 @@ pub async fn run_server(self_info: Arc<DeviceInfo>, shutdown: BroadcastReceiver<
       match request.opcode1().read() {
         0x1001 => {
           let mut content = ByteBuffer::new();
-          content.write_u16(self_info.process_id /* 0 */);
+          content.write_u16(self_info.process_id);
           content.write_bytes(&self_info.factory_device_id);
           content.write_u16(1);
           content.write_u16(0);

@@ -379,6 +379,7 @@ pub async fn run_server(
 ) {
   let server =
     UdpSocketWrapper::new(Some(self_info.ip_address), self_info.info_request_port, shutdown).await;
+  let mut recv_buff = crate::net_utils::ReceiveBuffer::new();
   let mut mcaster = Multicaster::new(self_info.as_ref(), server, clock, get_peaks);
   mcaster.send_board_info().await;
   mcaster.send_product_info().await;
@@ -386,7 +387,7 @@ pub async fn run_server(
   heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
   while mcaster.should_work() {
     select! {
-      r = mcaster.server.recv() => {
+      r = mcaster.server.recv(&mut recv_buff) => {
         let (_src, request_buf) = match r {
           Some(v) => v,
           None => continue
