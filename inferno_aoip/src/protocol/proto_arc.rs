@@ -1,8 +1,10 @@
+use std::marker::PhantomData;
+
 use binary_serde::BinarySerde;
 use bytebuffer::ByteBuffer;
 use log::error;
 
-use crate::byte_utils::make_u16;
+use crate::{byte_utils::make_u16, DeviceInfo};
 
 use super::req_resp::{Connection, HEADER_LENGTH};
 
@@ -70,6 +72,33 @@ pub mod get_device_names {
   }
 }
 
+#[derive(Debug, BinarySerde, Default)]
+pub struct CommonChannelsDescriptor {
+  pub sample_rate: u32,
+  pub unknown1_1: u8,
+  pub unknown2_1: u8,
+  pub bits_per_sample_1: u16,
+  pub unknown3_400: u16,
+  pub bits_per_sample_2: u16,
+  pub bits_per_sample_3: u16,
+  pub pcm_type: u16,
+}
+
+impl CommonChannelsDescriptor {
+  pub fn new(self_info: &DeviceInfo) -> Self {
+    Self {
+      sample_rate: self_info.sample_rate,
+      unknown1_1: 1,
+      unknown2_1: 1,
+      bits_per_sample_1: self_info.bits_per_sample.into(),
+      unknown3_400: 0x400,
+      bits_per_sample_2: self_info.bits_per_sample.into(),
+      bits_per_sample_3: self_info.bits_per_sample.into(),
+      pcm_type: self_info.pcm_type.into(),
+    }
+  }
+}
+
 pub mod get_receive_channels {
   use binary_serde::BinarySerde;
 
@@ -86,17 +115,43 @@ pub mod get_receive_channels {
     pub subscription_status: u32, // TODO. 0x01010009 if subscribed currently, 0x00000001 if not found but remembers subscription or in progress
     pub unknown2_0: u32,
   }
+}
+
+pub mod get_transmit_channels {
+  use binary_serde::BinarySerde;
+
+  pub const OPCODE: u16 = 0x2000;
 
   #[derive(Debug, BinarySerde, Default)]
-  pub struct CommonDescriptor {
-    pub sample_rate: u32,
-    pub unknown1_1: u8,
-    pub unknown2_1: u8,
-    pub bits_per_sample_1: u16,
-    pub unknown3_400: u16,
-    pub bits_per_sample_2: u16,
-    pub bits_per_sample_3: u16,
-    pub pcm_type: u16,
+  pub struct ChannelDescriptor {
+    pub channel_id: u16,
+    pub unknown1_7: u16,
+    pub common_descriptor_offset: u16,
+    pub name_offset: u16,
+  }
+}
+
+pub mod get_transmit_channels_friendly_names {
+  use binary_serde::BinarySerde;
+
+  pub const OPCODE: u16 = 0x2010;
+
+  #[derive(Debug, BinarySerde, Default)]
+  pub struct ChannelDescriptor {
+    pub channel_id_1: u16,
+    pub channel_id_2: u16,
+    pub friendly_name_offset: u16,
+  }
+}
+
+pub mod rename_tx_channel {
+  pub const OPCODE: u16 = 0x2013;
+  
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct SingleChannelRenameRequest {
+    pub unknown1_0: u16,
+    pub channel_id: u16,
+    pub new_name_offset: u16,
   }
 }
 
@@ -168,4 +223,42 @@ pub async fn paginate_respond<InItem, OutItem>(
   let (have_more, bytes) = serialize_items(space_items, source.into_iter().skip(start_index), transform);
   let code = if have_more { 0x8112 } else { 1 };
   connection.respond_with_code(code, &bytes).await;
+}
+
+pub struct ItemsInPacketIterator<'a, T> {
+  items_bytes: &'a [u8],
+  item_start: usize,
+  _t: PhantomData<T>,
+}
+
+impl<'a, T: BinarySerde> Iterator for ItemsInPacketIterator<'a, T> {
+  type Item = T;
+  fn next(&mut self) -> Option<Self::Item> {
+    loop {
+      let item_start = self.item_start;
+      let item_end = item_start + T::SERIALIZED_SIZE;
+      self.item_start = item_end;
+      if item_end > self.items_bytes.len() {
+        return None;
+      }
+      match T::binary_deserialize(&self.items_bytes[item_start..item_end], binary_serde::Endianness::Big) {
+        Ok(item) => {
+          return Some(item);
+        },
+        Err(e) => {
+          error!("unable to deserialize item in incoming packet: {e:?}, item: {}, all items: {}", hex::encode(&self.items_bytes[item_start..item_end]), hex::encode(&self.items_bytes));
+        }
+      }
+    }
+  }
+}
+
+pub fn deserialize_items<'a, T: BinarySerde>(payload: &'a [u8]) -> ItemsInPacketIterator<'a, T> {
+  let num_items: usize = (*payload.get(1).unwrap_or(&0)).into();
+  let num_items = num_items.min(payload.len() / T::SERIALIZED_SIZE);
+  ItemsInPacketIterator::<'a, T> {
+    items_bytes: &payload[2..][..num_items*T::SERIALIZED_SIZE],
+    item_start: 0,
+    _t: Default::default()
+  }
 }
