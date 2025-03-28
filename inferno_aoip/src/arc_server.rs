@@ -234,10 +234,10 @@ pub async fn run_server(
           renamed_ids.for_each(drop); // consume the whole iterator
 
           if renamed_anything {
-            conn.respond_with_code(0 /* TODO: really? */, &[]).await;
-          } else {
             conn.respond_with_code(1, &[0, 0]).await;
             // sometimes it is [0, 1, 0, 0, H(channel_id), L(channel_id)], but it doesn't look necessary
+          } else {
+            conn.respond_with_code(0 /* TODO: really? */, &[]).await;
           }
         }
         rename_rx_channels::OPCODE => {
