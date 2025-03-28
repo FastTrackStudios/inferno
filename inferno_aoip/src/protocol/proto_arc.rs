@@ -144,7 +144,7 @@ pub mod get_transmit_channels_friendly_names {
   }
 }
 
-pub mod rename_tx_channel {
+pub mod rename_tx_channels {
   pub const OPCODE: u16 = 0x2013;
   
   #[derive(Debug, binary_serde::BinarySerde, Default)]
@@ -155,10 +155,102 @@ pub mod rename_tx_channel {
   }
 }
 
+pub mod rename_rx_channels {
+  pub const OPCODE: u16 = 0x3001;
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct SingleChannelRenameRequest {
+    pub channel_id: u16,
+    pub new_name_offset: u16,
+  }
+}
+
+#[derive(Debug, binary_serde::BinarySerde, Default)]
+pub struct ReceiverSocketDescriptor {
+  pub unknown1_8002: u16,
+  pub rx_port: u16,
+  pub rx_addr: [u8; 4],
+}
+
+pub mod query_tx_flows {
+  pub const OPCODE: u16 = 0x2200;
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct NamesDescriptor {
+    pub unknown1_a00: u16,
+    pub unknown2_1: u16,
+    pub remote_hostname_offset: u16,
+    pub remote_rx_flow_name_offset: u16,
+    pub unknown3_10: u16, // or 0x3c ???
+    pub local_tx_flow_name_offset: u16,
+    pub unknown4_0: [u8; 8],
+  }
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct FlowDescriptorHeader {
+    pub flow_id: u16,
+    pub flow_type: u16, // 0x11 for unicast, 2 for multicast
+    pub sample_rate: u32,
+    pub unknown1_0: u16,
+    pub bits_per_sample: u16,
+    pub unknown2_1: u16,
+    pub channels_count: u16,
+    pub receiver_socket_descriptor_offset: u16,
+  }
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct FlowDescriptorFooter {
+    pub names_descriptor_offset: u16,
+  }
+}
+
+pub mod query_rx_flows {
+  pub const OPCODE: u16 = 0x3200;
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct Descriptor2 {
+    pub unknown1_9: u16,
+    pub unknown2_1: u16,
+    pub unknown3_800: u16,
+    pub unknown4_0: u16,
+    pub latency_ns: u32,
+    pub unknown5_0: u32,
+  }
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct FlowDescriptorHeader {
+    pub flow_id: u16,
+    pub unknown1_1: u16,
+    pub sample_rate: u32,
+    pub unknown2_0: u16,
+    pub bits_per_sample: u16,
+    pub unknown3_1: u16,
+    pub channels_count: u16,
+    pub words_per_bitmask: u16,
+    pub receiver_socket_descriptor_offset: u16,
+  }
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct FlowDescriptorFooter {
+    pub descriptor2_offset: u16,
+  }
+}
+
+pub mod set_channels_subscriptions {
+  pub const OPCODE: u16 = 0x3010;
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct SingleChannelSubscriptionRequest {
+    pub local_channel_id: u16,
+    pub tx_channel_name_offset: u16,
+    pub tx_hostname_offset: u16,
+  }
+}
+
 pub fn serialize_items<InItem, OutItem>(
   space_items: u8,
   source: impl IntoIterator<Item = InItem>,
-  mut transform: impl FnMut(InItem, &mut ByteBuffer) -> OutItem
+  mut transform: impl FnMut(InItem, &mut ByteBuffer) -> Option<OutItem>
 ) -> (bool, Vec<u8>)
   where OutItem: BinarySerde {
   let mut bytes = ByteBuffer::new();
@@ -182,7 +274,11 @@ pub fn serialize_items<InItem, OutItem>(
       have_more = true;
       break;
     }
-    let out_item = transform(in_item, &mut bytes);
+    let out_item = if let Some(item) = transform(in_item, &mut bytes) {
+      item
+    } else {
+      continue;
+    };
     out_item.binary_serialize(&mut tmp_buffer, binary_serde::Endianness::Big);
     let prev_pos = bytes.get_wpos();
     bytes.set_wpos(item_pos);
@@ -208,22 +304,38 @@ pub fn extract_start_index(request_payload: &[u8]) -> Option<usize> {
   Some((make_u16(request_payload[2], request_payload[3]) - 1).into())
 }
 
+pub fn paginate_make_response<InItem, OutItem>(
+  connection: &mut Connection,
+  request_payload: &[u8],
+  space_items: u8,
+  source: impl IntoIterator<Item = InItem>,
+  transform: impl FnMut(InItem, &mut ByteBuffer) -> Option<OutItem>
+) -> (u16, Vec<u8>)
+  where OutItem: BinarySerde {
+  let start_index = match extract_start_index(request_payload) {
+    Some(v) => v,
+    None => {
+      error!("unable to extract start index from request payload {}", hex::encode(request_payload));
+      return (0 /* TODO */, vec![]);
+    }
+  };
+  let (have_more, bytes) = serialize_items(space_items, source.into_iter().skip(start_index), transform);
+  let code = if have_more { 0x8112 } else { 1 };
+  (code, bytes)
+}
+
 pub async fn paginate_respond<InItem, OutItem>(
   connection: &mut Connection,
   request_payload: &[u8],
   space_items: u8,
   source: impl IntoIterator<Item = InItem>,
-  transform: impl FnMut(InItem, &mut ByteBuffer) -> OutItem
+  transform: impl FnMut(InItem, &mut ByteBuffer) -> Option<OutItem>
 )
   where OutItem: BinarySerde {
-  let start_index = match extract_start_index(request_payload) {
-    Some(v) => v,
-    None => return
-  };
-  let (have_more, bytes) = serialize_items(space_items, source.into_iter().skip(start_index), transform);
-  let code = if have_more { 0x8112 } else { 1 };
+  let (code, bytes) = paginate_make_response(connection, request_payload, space_items, source, transform);
   connection.respond_with_code(code, &bytes).await;
 }
+
 
 pub struct ItemsInPacketIterator<'a, T> {
   items_bytes: &'a [u8],

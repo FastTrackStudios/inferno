@@ -141,7 +141,7 @@ pub async fn run_server(
                 None => 0,
                 Some(ss) => ss.status as u32,
               };
-              get_receive_channels::ChannelDescriptor {
+              Some(get_receive_channels::ChannelDescriptor {
                 channel_id: (channel_index + 1).try_into().unwrap(),
                 unknown1_6: 6,
                 common_descriptor_offset,
@@ -150,7 +150,7 @@ pub async fn run_server(
                 friendly_name_offset: write_0term_str_to_bytebuffer(bytes, &ch.friendly_name.read().unwrap()),
                 subscription_status: status_value,
                 unknown2_0: 0,
-              }
+              })
             }
           ).await;
         }
@@ -169,12 +169,12 @@ pub async fn run_server(
                 common_descriptor_offset = bytes.get_wpos().try_into().unwrap();
                 bytes.write_bytes(descr.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
               }
-              get_transmit_channels::ChannelDescriptor {
+              Some(get_transmit_channels::ChannelDescriptor {
                 channel_id: (channel_index + 1).try_into().unwrap(),
                 unknown1_7: 7,
                 common_descriptor_offset,
                 name_offset: write_0term_str_to_bytebuffer(bytes, &ch.factory_name),
-              }
+              })
             }
           ).await;
         }
@@ -193,19 +193,18 @@ pub async fn run_server(
                 wrote = true;
               }
               let channel_id = (channel_index + 1).try_into().unwrap();
-              get_transmit_channels_friendly_names::ChannelDescriptor {
+              Some(get_transmit_channels_friendly_names::ChannelDescriptor {
                 channel_id_1: channel_id,
                 channel_id_2: channel_id,
                 friendly_name_offset: write_0term_str_to_bytebuffer(bytes, &ch.friendly_name.read().unwrap()),
-              }
+              })
             }
           ).await;
         }
 
-        rename_tx_channel::OPCODE => {
-          // rename TX channel
+        rename_tx_channels::OPCODE => {
           let content = request.content();
-          let mut renamed_ids = deserialize_items::<rename_tx_channel::SingleChannelRenameRequest>(content).filter_map(|rename| {
+          let mut renamed_ids = deserialize_items::<rename_tx_channels::SingleChannelRenameRequest>(content).filter_map(|rename| {
             let channel_id = rename.channel_id.saturating_sub(HEADER_LENGTH as _);
             let name_offset = rename.new_name_offset.saturating_sub(HEADER_LENGTH as _);
             if channel_id==0 || name_offset==0 {
@@ -241,120 +240,97 @@ pub async fn run_server(
             // sometimes it is [0, 1, 0, 0, H(channel_id), L(channel_id)], but it doesn't look necessary
           }
         }
-        0x3001 => {
-          // rename RX channel
-          // TODO support multiple renames in request
+        rename_rx_channels::OPCODE => {
           let content = request.content();
-          let channel_id = make_u16(content[2], content[3]);
-          let name_offset = make_u16(content[4], content[5]);
-          let mut channel_indices = vec![];
-          let code = match read_0term_str_from_buffer(content, name_offset as usize - HEADER_LENGTH) {
-            Ok(new_name) => {
-              let index = (channel_id - 1) as usize;
-              if index < self_info.rx_channels.len() {
-                info!("renaming RX channel id {channel_id} to {new_name}");
-                channel_indices.push(index);
-                saved_channels.rename_rx_channel(index, new_name.to_owned());
-                1
-              } else {
-                error!("got rename RX channel request with invalid channel number {channel_id}");
-                0 // really?
+          let mut renamed_any = false;
+          let renamed_indices = deserialize_items::<rename_rx_channels::SingleChannelRenameRequest>(content).filter_map(|rename| {
+            let channel_id = rename.channel_id.saturating_sub(HEADER_LENGTH as _);
+            let name_offset = rename.new_name_offset.saturating_sub(HEADER_LENGTH as _);
+            if channel_id==0 || name_offset==0 {
+              return None;
+            }
+            match read_0term_str_from_buffer(content, name_offset as usize - HEADER_LENGTH) {
+              Ok(new_name) => {
+                let index = (channel_id - 1) as usize;
+                if index < self_info.rx_channels.len() {
+                  info!("renaming RX channel id {channel_id} to {new_name}");
+                  saved_channels.rename_rx_channel(index, new_name.to_owned());
+                  renamed_any = true;
+                  Some(index)
+                } else {
+                  error!("got rename RX channel request with invalid channel number {channel_id}");
+                  None
+                }
+              }
+              Err(e) => {
+                error!("could not read new channel name from packet: {e:?}");
+                None
               }
             }
-            Err(e) => {
-              error!("could not read new channel name from packet: {e:?}");
-              0 // really?
-            }
-          };
-          conn.respond_with_code(code, &[]).await;
-          if code == 1 {
-            mcast.send(make_channel_change_notification(channel_indices)).await.log_and_forget();
-          }
+          });
+          mcast.send(make_channel_change_notification(renamed_indices)).await.log_and_forget();
+          conn.respond_with_code(if renamed_any { 1 } else { 0 /* TODO */}, &[]).await;
         }
-        0x2200 => {
+        query_tx_flows::OPCODE => {
           // query TX flows
           let content = request.content();
-          let start_index = make_u16(content[2], content[3]) as usize - 1;
-          let mut response = ByteBuffer::new();
-          let code = {
-            let flows_info = tx_flows_info.read().unwrap();
-            let remaining = flows_info.iter().skip(start_index).filter(|opt| opt.is_some()).count();
-            let limit = 12;
-            let in_this_response = min(limit, remaining);
+          let (code, response) = paginate_make_response(
+            &mut conn,
+            content,
+            MAX_TX_FLOWS.min(16).try_into().unwrap(),
+            tx_flows_info.read().unwrap().iter().enumerate(),
+            |(flow_index, flow_opt), bytes| -> Option<u16> {
+              flow_opt.as_ref().map(|flow_info| -> u16 {
+                let flow_id = flow_index + 1;
+                let flow_name = format!("{}_{}", flow_id, self_info.process_id);
+                let local_tx_flow_name_offset = write_0term_str_to_bytebuffer(bytes, &flow_name);
+                let remote_hostname_offset = write_0term_str_to_bytebuffer(bytes, &flow_info.rx_hostname);
+                let remote_rx_flow_name_offset = write_0term_str_to_bytebuffer(bytes, &flow_info.rx_flow_name);
 
-            response.write_u8(in_this_response as u8);
-            response.write_u8(in_this_response as u8);
-            for _ in 0..in_this_response {
-              response.write_u16(0);
+                align_wpos(bytes, 4);
+                let receiver_socket_descriptor_offset = bytes.get_wpos().try_into().unwrap();
+                bytes.write_bytes(ReceiverSocketDescriptor {
+                  unknown1_8002: 0x8002,
+                  rx_port: flow_info.rx_port,
+                  rx_addr: flow_info.rx_addr.octets(),
+                }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+
+                let names_descriptor_offset = bytes.get_wpos().try_into().unwrap();
+                bytes.write_bytes(query_tx_flows::NamesDescriptor {
+                  unknown1_a00: 0xa00,
+                  unknown2_1: 1,
+                  remote_hostname_offset,
+                  remote_rx_flow_name_offset,
+                  unknown3_10: 0x10,
+                  local_tx_flow_name_offset,
+                  ..Default::default()
+                }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+
+                let main_descriptor_offset = bytes.get_wpos();
+                bytes.write_bytes(query_tx_flows::FlowDescriptorHeader {
+                  flow_id: flow_id.try_into().unwrap(),
+                  flow_type: 0x11,
+                  sample_rate: self_info.sample_rate,
+                  unknown1_0: 0,
+                  bits_per_sample: self_info.bits_per_sample.into(),
+                  unknown2_1: 1,
+                  channels_count: flow_info.local_channel_indices.len().try_into().unwrap(),
+                  receiver_socket_descriptor_offset,
+                }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+
+                for ch in &flow_info.local_channel_indices {
+                  bytes.write_u16(ch.map(|i| i + 1).unwrap_or(0).try_into().unwrap());
+                }
+
+                bytes.write_bytes(query_tx_flows::FlowDescriptorFooter {
+                  names_descriptor_offset,
+                }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+
+                main_descriptor_offset.try_into().unwrap()
+              })
             }
-            let mut flow_positions = vec![];
-
-            for (flow_index, flow_info_opt) in
-              flows_info.iter().enumerate().skip(start_index).take(in_this_response)
-            {
-              // 58 bytes per descriptor (with 2 channels and 2-word mask)
-              // 46 + channels_per_flow * (bytes_per_mask + 2)
-              if flow_info_opt.is_none() {
-                continue;
-              }
-              let flow_info = flow_info_opt.as_ref().unwrap();
-
-              let flow_id = flow_index + 1;
-              let local_tx_flow_name_offset = response.get_wpos() + HEADER_LENGTH;
-              let flow_name = format!("{}_{}", flow_id, self_info.process_id);
-              response.write_bytes(flow_name.as_bytes());
-              response.write_u8(0);
-
-              let remote_hostname_offset = response.get_wpos() + HEADER_LENGTH;
-              response.write_bytes(flow_info.rx_hostname.as_bytes());
-              response.write_u8(0);
-
-              let remote_rx_flow_name_offset = response.get_wpos() + HEADER_LENGTH;
-              response.write_bytes(flow_info.rx_flow_name.as_bytes());
-              response.write_u8(0);
-
-              while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
-                response.write_u8(0);
-              }
-              let descriptor1_pos = response.get_wpos() + HEADER_LENGTH;
-              response.write_u16(0x0802);
-              response.write_u16(flow_info.rx_port);
-              response.write_bytes(&flow_info.rx_addr.octets());
-
-              let descriptor2_pos = response.get_wpos();
-              response.write_bytes(&[0x0a, 0x00, 0x00, 0x01]);
-              response.write_u16(remote_hostname_offset as u16);
-              response.write_u16(remote_rx_flow_name_offset as u16);
-              response.write_u16(0x10); // ??? 0x3c (60), or 0x10...
-              response.write_u16(local_tx_flow_name_offset as u16);
-              response.write_bytes(&[0u8; 8]);
-
-              flow_positions.push(response.get_wpos() + HEADER_LENGTH);
-              response.write_u16(flow_id.try_into().unwrap());
-              response.write_u16(0x11); // or 2 for multicast
-              response.write_u32(self_info.sample_rate);
-              response.write_u16(0);
-              response.write_u16(0x18);
-              response.write_u16(1);
-              response.write_u16(flow_info.local_channel_indices.len().try_into().unwrap());
-              response.write_u16(descriptor1_pos as u16);
-              for ch in &flow_info.local_channel_indices {
-                response.write_u16(ch.map(|i| i + 1).unwrap_or(0).try_into().unwrap());
-              }
-              response.write_u16(descriptor2_pos as u16);
-            }
-
-            response.set_wpos(2);
-            for pos in flow_positions {
-              response.write_u16(pos as _);
-            }
-            if remaining > in_this_response {
-              0x8112
-            } else {
-              1
-            }
-          };
-          conn.respond_with_code(code, response.as_bytes()).await;
+          );
+          conn.respond_with_code(code, &response).await;
         }
         0x2320 => {
           // ???
@@ -364,100 +340,82 @@ pub async fn run_server(
         0x2201 => {
           // Create multicast TX flow
         }
-        0x3200 => {
+        query_rx_flows::OPCODE => {
           // query RX flows
-          let mut response = ByteBuffer::new();
-          response.set_endian(Endian::BigEndian);
-          let code = if let Some(chsub) = subscriber.as_ref() {
-            let flows_info = chsub.flows_info();
-            let flows_info = flows_info.read().unwrap();
-            let content = request.content();
-            let start_index = make_u16(content[2], content[3]) as usize - 1;
-            let remaining = flows_info.iter().skip(start_index).filter(|opt| opt.is_some()).count();
-            let limit = 12;
-            let in_this_response = min(limit, remaining);
+          let content = request.content();
+          let (code, response) = if let Some(chsub) = subscriber.as_ref() {
+            paginate_make_response(
+              &mut conn,
+              content,
+              MAX_RX_FLOWS.min(16).try_into().unwrap(),
+              chsub.flows_info().read().unwrap().iter().enumerate(),
+              |(flow_index, flow_opt), bytes| -> Option<u16> {
+                flow_opt.as_ref().map(|flow_info| -> u16 {
+                  align_wpos(bytes, 4);
+                  let receiver_socket_descriptor_offset = bytes.get_wpos().try_into().unwrap();
+                  bytes.write_bytes(ReceiverSocketDescriptor {
+                    unknown1_8002: 0x8002,
+                    rx_port: flow_info.rx_port,
+                    rx_addr: self_info.ip_address.octets(),
+                  }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
 
-            response.write_u8(in_this_response as _);
-            response.write_u8(in_this_response as _);
-            for _ in 0..in_this_response {
-              response.write_u16(0);
-            }
-            let mut flow_positions = vec![];
-            for (flow_index, flow_info_opt) in
-              flows_info.iter().enumerate().skip(start_index).take(in_this_response)
-            {
-              // 58 bytes per descriptor (with 2 channels and 2-word mask)
-              // 46 + channels_per_flow * (bytes_per_mask + 2)
-              if flow_info_opt.is_none() {
-                continue;
-              }
-              while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
-                response.write_u16(0);
-              }
-              let flow_info = flow_info_opt.as_ref().unwrap();
+                  let descriptor2_offset = bytes.get_wpos().try_into().unwrap();
+                  bytes.write_bytes(query_rx_flows::Descriptor2 {
+                    unknown1_9: 9,
+                    unknown2_1: 1,
+                    unknown3_800: 0x800,
+                    unknown4_0: 0,
+                    latency_ns: (flow_info.latency_samples as u64 * 1_000_000_000u64 / self_info.sample_rate as u64).try_into().unwrap(),
+                    unknown5_0: 0,
+                  }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
 
-              let descriptor1_pos = response.get_wpos() + HEADER_LENGTH;
-              response.write_u16(0x0802);
-              response.write_u16(flow_info.rx_port);
-              response.write_bytes(&self_info.ip_address.octets());
+                  let req_bits_in_mask = flow_info.channels_map.iter().map(|bv|bv.len()).max().unwrap_or(0);
+                  let words_per_bitmask = ((req_bits_in_mask+15) / 16).max(1);
 
-              let descriptor2_pos = response.get_wpos() + HEADER_LENGTH;
-              response.write_bytes(&[0x00, 0x09, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00]);
-              response.write_u32(
-                (flow_info.latency_samples as u64 * 1_000_000_000u64 / self_info.sample_rate as u64)
-                  .try_into()
-                  .unwrap(),
-              );
-              response.write_u32(0);
+                  let bitmask_offsets = flow_info.channels_map.iter().map(|mask| {
+                    let mut chi = 0;
+                    let pos = bytes.get_wpos();
+                    for _ in 0..words_per_bitmask {
+                      let mut word: u16 = 0;
+                      let mut single_bit = 1;
+                      while single_bit != 0 {
+                        word |= if mask.get(chi).unwrap_or(false) { single_bit } else { 0 };
+                        chi += 1;
+                        single_bit <<= 1;
+                      }
+                      bytes.write_u16(word);
+                    }
+                    pos
+                  }).collect_vec();
 
-              let words_per_bitmask = 2;
-              let bitmasks_start = response.get_wpos() + HEADER_LENGTH;
-              for mask in &flow_info.channels_map {
-                let mut chi = 0;
-                for _ in 0..words_per_bitmask {
-                  let mut word: u16 = 0;
-                  let mut single_bit = 1;
-                  while single_bit != 0 {
-                    word |= if mask.get(chi).unwrap_or(false) { single_bit } else { 0 };
-                    chi += 1;
-                    single_bit <<= 1;
+                  align_wpos(bytes, 4);
+                  let main_descriptor_offset = bytes.get_wpos();
+                  bytes.write_bytes(query_rx_flows::FlowDescriptorHeader {
+                    flow_id: (flow_index+1).try_into().unwrap(),
+                    unknown1_1: 1,
+                    sample_rate: self_info.sample_rate,
+                    unknown2_0: 0,
+                    bits_per_sample: self_info.bits_per_sample.into(),
+                    unknown3_1: 1,
+                    channels_count: flow_info.channels_map.len().try_into().unwrap(),
+                    words_per_bitmask: words_per_bitmask.try_into().unwrap(),
+                    receiver_socket_descriptor_offset,
+                  }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+                  for pos in bitmask_offsets {
+                    bytes.write_u16(pos.try_into().unwrap());
                   }
-                  response.write_u16(word);
-                }
-              }
+                  bytes.write_bytes(query_rx_flows::FlowDescriptorFooter {
+                    descriptor2_offset
+                  }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
 
-              while ((response.get_wpos() + HEADER_LENGTH) % 4) != 0 {
-                response.write_u16(0);
+                  main_descriptor_offset.try_into().unwrap()
+                })
               }
-              flow_positions.push(response.get_wpos() + HEADER_LENGTH);
-              response.write_u16((flow_index + 1) as _);
-              response.write_u16(1);
-              response.write_u32(self_info.sample_rate);
-              response.write_bytes(&[0x00, 0x00, 0x00, 0x18, 0x00, 0x01]);
-              response.write_u16(flow_info.channels_map.len() as _); // was 2
-              response.write_u16(words_per_bitmask as _); // 2-byte-words per bitmask, was 1
-
-              response.write_u16(descriptor1_pos as _);
-              for i in 0..flow_info.channels_map.len() {
-                response.write_u16((bitmasks_start + i * 2 * words_per_bitmask) as _);
-              }
-              response.write_u16(descriptor2_pos as _);
-            }
-
-            response.set_wpos(2);
-            for pos in flow_positions {
-              response.write_u16(pos as _);
-            }
-            if remaining > in_this_response {
-              0x8112
-            } else {
-              1
-            }
+            )
           } else {
-            response.write_bytes(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-            1
+            (1, vec![])
           };
-          conn.respond_with_code(code, response.as_bytes()).await;
+          conn.respond_with_code(code, &response).await;
         }
 
         0x1100 => {
@@ -503,22 +461,22 @@ pub async fn run_server(
           //conn.respond(&[0u8; 8]).await;
         }
 
-        0x3010 => {
+        set_channels_subscriptions::OPCODE => {
           // subscribe (connect our receiver to remote transmitter)
           // or unsubscribe if tx_*_offset is 0
           if let Some(channels_recv) = &subscriber {
             let c_whole = request.content();
-            let count = c_whole[1] as usize;
-            for i in 0..count {
-              let c = &c_whole[2 + i * 6..];
-              let local_channel = make_u16(c[0], c[1]);
-              let tx_channel_offset = make_u16(c[2], c[3]) as usize;
-              let tx_hostname_offset = make_u16(c[4], c[5]) as usize;
-              let local_channel_index = (local_channel - 1) as usize;
-              if tx_channel_offset > 0 && tx_hostname_offset > 0 {
-                let str_or_none = |offset| match offset {
-                  _ if offset < HEADER_LENGTH => None,
-                  v => match read_0term_str_from_buffer(&c_whole, v - HEADER_LENGTH) {
+            for req in deserialize_items::<set_channels_subscriptions::SingleChannelSubscriptionRequest>(c_whole) {
+              if req.local_channel_id==0 { continue; }
+              let local_channel_index = (req.local_channel_id - 1).try_into().unwrap();
+              if local_channel_index >= self_info.rx_channels.len() {
+                error!("got connect/disconnect request for nonexisting channel {}", req.local_channel_id);
+                continue;
+              }
+              if req.tx_channel_name_offset > 0 && req.tx_hostname_offset > 0 {
+                let str_or_none = |offset: u16| match offset {
+                  _ if offset < (HEADER_LENGTH as _) => None,
+                  v => match read_0term_str_from_buffer(&c_whole, v as usize - HEADER_LENGTH) {
                     Ok(s) => Some(s),
                     Err(e) => {
                       error!("failed to decode string: {e:?}");
@@ -526,11 +484,11 @@ pub async fn run_server(
                     }
                   },
                 };
-                let tx_channel_name = str_or_none(tx_channel_offset);
-                let tx_hostname = str_or_none(tx_hostname_offset);
+                let tx_channel_name = str_or_none(req.tx_channel_name_offset);
+                let tx_hostname = str_or_none(req.tx_hostname_offset);
                 info!(
                   "connection requested: {} <- {:?} @ {:?}",
-                  local_channel, tx_channel_name, tx_hostname
+                  req.local_channel_id, tx_channel_name, tx_hostname
                 );
                 if tx_channel_name.is_some() && tx_hostname.is_some() {
                   channels_recv
@@ -540,7 +498,7 @@ pub async fn run_server(
                   error!("couldn't read tx names from subscription request: {}", hex::encode(&c_whole));
                 }
               } else {
-                info!("disconnect requested: local channel {}", local_channel);
+                info!("disconnect requested: local channel {}", req.local_channel_id);
                 channels_recv.unsubscribe(local_channel_index).await;
               }
             }

@@ -28,6 +28,12 @@ pub fn write_0term_str_to_bytebuffer(bytes: &mut ByteBuffer, s: &str) -> u16 {
   return offset.try_into().unwrap();
 }
 
+pub fn align_wpos(bytes: &mut ByteBuffer, alignment: usize) {
+  while (bytes.get_wpos() % alignment) != 0 {
+    bytes.write_u8(0);
+  }
+}
+
 pub fn read_0term_str_from_buffer(buffer: &[u8], offset: usize) -> Result<&str, Box<dyn Error>> {
   if offset >= buffer.len() {
     return Err(Box::new(io::Error::from(io::ErrorKind::UnexpectedEof)));
