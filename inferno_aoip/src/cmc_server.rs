@@ -1,9 +1,11 @@
 use crate::common::*;
+use crate::protocol::req_resp::CODE_OK;
 use std::sync::Arc;
 
 use crate::device_info::DeviceInfo;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::req_resp;
+use crate::protocol::proto_cmc::*;
 use bytebuffer::ByteBuffer;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 
@@ -19,16 +21,17 @@ pub async fn run_server(self_info: Arc<DeviceInfo>, shutdown: BroadcastReceiver<
 
     if request.opcode2().read() == 0 {
       match request.opcode1().read() {
-        0x1001 => {
-          let mut content = ByteBuffer::new();
-          content.write_u16(self_info.process_id);
-          content.write_bytes(&self_info.factory_device_id);
-          content.write_u16(1);
-          content.write_u16(0);
-          content.write_bytes(&self_info.ip_address.octets());
-          content.write_u16(self_info.info_request_port);
-          content.write_u16(0);
-          conn.respond(content.as_bytes()).await;
+        REQUEST_DEVICE_ADVERTISEMENT => {
+          let adv = DeviceAdvertisement {
+            process_id: self_info.process_id,
+            factory_device_id: self_info.factory_device_id,
+            unknown1_1: 1,
+            unknown2_0: 0,
+            ip_address: self_info.ip_address.octets(),
+            info_request_port: self_info.info_request_port,
+            unknown3_0: 0,
+          };
+          conn.respond_with_struct(CODE_OK, adv).await;
         }
         other => {
           error!("received unknown opcode1 {other:#04x}, content {}", hex::encode(request.content()));
