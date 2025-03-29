@@ -2,14 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use clock_steering::Clock as _;
-use futures::AsyncWriteExt;
 pub use usrvclock::AsyncClient as ClockReceiver;
 pub use usrvclock::ClockOverlay;
 use usrvclock::SafeClock;
 
-use crate::real_time_box_channel::RealTimeBoxReceiver;
-use crate::{common::*, real_time_box_channel};
+use crate::util::real_time_box_channel::{self, RealTimeBoxReceiver};
+use crate::common::*;
 pub type RealTimeClockReceiver = RealTimeBoxReceiver<Option<ClockOverlay>>;
 
 /// High-precision clock (nanoseconds)

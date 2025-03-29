@@ -1,7 +1,7 @@
 use crate::device_info::DeviceInfo;
 use crate::net_utils::MTU;
 use crate::util::os::set_current_thread_realtime;
-use crate::real_time_box_channel::RealTimeBoxReceiver;
+use crate::util::real_time_box_channel::RealTimeBoxReceiver;
 use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RingBufferShared};
 use crate::samples_utils::*;
 use crate::{common::*, MediaClock};

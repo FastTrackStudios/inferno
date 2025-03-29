@@ -4,7 +4,7 @@ use crate::{
   common::*,
   device_info::DeviceInfo,
   media_clock::{ClockOverlay, MediaClock},
-  real_time_box_channel::{self, RealTimeBoxReceiver, RealTimeBoxSender},
+  util::real_time_box_channel::{self, RealTimeBoxReceiver, RealTimeBoxSender},
   ring_buffer::{
     ProxyToBuffer, ProxyToSamplesBuffer, RBOutput,
   },
