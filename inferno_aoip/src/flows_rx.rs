@@ -1,6 +1,6 @@
 use crate::device_info::DeviceInfo;
 use crate::net_utils::MTU;
-use crate::os_utils::set_current_thread_realtime;
+use crate::util::os::set_current_thread_realtime;
 use crate::real_time_box_channel::RealTimeBoxReceiver;
 use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RingBufferShared};
 use crate::samples_utils::*;
@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 
 use atomic::Ordering;
 use bool_vec::{boolvec, BoolVec};
-use futures::{Future, FutureExt};
 use itertools::Itertools;
 use mio::net::UdpSocket;
 use tokio::sync::mpsc;

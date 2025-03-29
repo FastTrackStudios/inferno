@@ -13,10 +13,10 @@ use rand::{thread_rng, Rng, SeedableRng};
 use tokio::sync::watch;
 use tokio::{select, sync::mpsc};
 
-use crate::os_utils::set_current_thread_realtime;
+use crate::util::os::set_current_thread_realtime;
 use crate::ring_buffer::{ProxyToSamplesBuffer, RBOutput};
 use crate::samples_utils::*;
-use crate::thread_utils::run_future_in_new_thread;
+use crate::util::thread::run_future_in_new_thread;
 use crate::{common::*, DeviceInfo};
 use crate::{
   media_clock::{ClockOverlay, MediaClock},

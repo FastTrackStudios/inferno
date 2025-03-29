@@ -73,7 +73,6 @@
 //!
 
 mod arc_server;
-mod byte_utils;
 mod channels_subscriber;
 mod cmc_server;
 mod common;
@@ -86,8 +85,6 @@ mod info_mcast_server;
 mod mdns_client;
 mod mdns_server;
 mod media_clock;
-mod net_utils;
-mod os_utils;
 mod peaks;
 mod protocol;
 mod real_time_box_channel;
@@ -96,7 +93,7 @@ mod samples_collector;
 mod samples_utils;
 mod settings;
 mod state_storage;
-mod thread_utils;
+mod util;
 
 pub use common::{Clock, ClockDiff, Sample};
 pub use device_info::*;
@@ -104,10 +101,12 @@ pub use device_server::DeviceServer;
 pub use media_clock::{MediaClock, RealTimeClockReceiver};
 pub use ring_buffer::{ExternalBufferParameters, PositionReportDestination};
 pub use settings::Settings;
+pub use util::bytes as byte_utils;
+pub use util::net as net_utils;
 pub type AtomicSample = atomic::Atomic<Sample>;
 
 pub mod utils {
   pub use crate::common::LogAndForget;
-  pub use crate::os_utils::set_current_thread_realtime;
-  pub use crate::thread_utils::run_future_in_new_thread;
+  pub use crate::util::os::set_current_thread_realtime;
+  pub use crate::util::thread::run_future_in_new_thread;
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-  ring_buffer::{ProxyToBuffer, ProxyToSamplesBuffer, RingBufferShared},
+  ring_buffer::{ProxyToSamplesBuffer, RingBufferShared},
   Sample,
 };
 
