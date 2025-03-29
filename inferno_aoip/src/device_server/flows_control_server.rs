@@ -3,7 +3,7 @@ use itertools::Itertools;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 
-use crate::flows_tx::{FlowsTransmitter, FPP_MAX, MAX_FLOWS};
+use super::flows_tx::{FlowsTransmitter, FPP_MAX, MAX_FLOWS};
 use crate::protocol::flows_control::{FlowControlError, FlowHandle};
 use crate::{
   byte_utils::{make_u16, read_0term_str_from_buffer},

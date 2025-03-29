@@ -8,7 +8,7 @@ use std::{
   sync::{Arc, RwLock},
 };
 
-use crate::flows_tx::{FPP_MAX_ADVERTISED, FPP_MIN, MAX_CHANNELS_IN_FLOW};
+use super::flows_tx::{FPP_MAX_ADVERTISED, FPP_MIN, MAX_CHANNELS_IN_FLOW};
 use crate::{device_info::DeviceInfo, utils::LogAndForget};
 
 pub struct DeviceMDNSResponder {

@@ -1,9 +1,9 @@
 use crate::byte_utils::*;
-use crate::channels_subscriber::ChannelsSubscriber;
+use super::channels_subscriber::ChannelsSubscriber;
 use crate::common::*;
 use crate::net_utils::UdpSocketWrapper;
-use crate::protocol::mcast::make_packet;
-use crate::MediaClock;
+use crate::protocol::mcast::{make_packet, MulticastMessage};
+use crate::media_clock::MediaClock;
 use crate::{byte_utils::write_str_to_buffer, device_info::DeviceInfo};
 use bytebuffer::ByteBuffer;
 use std::sync::atomic::Ordering;
@@ -24,12 +24,6 @@ use tokio::{
 const SEND_BUFFER_SIZE: usize = 1500;
 const DST_PORT_HEARTBEAT: u16 = 8708;
 const DST_PORT_DEVICE_INFO: u16 = 8702;
-
-pub struct MulticastMessage {
-  pub start_code: u16,
-  pub opcode: [u8; 8],
-  pub content: Vec<u8>,
-}
 
 pub type PeaksCallback = Box<dyn FnMut() -> (Vec<u8>, Vec<u8>) + Send + Sync>;
 

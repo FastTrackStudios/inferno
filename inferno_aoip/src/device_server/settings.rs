@@ -12,7 +12,7 @@ use crate::protocol::flows_control::PORT as FLOWS_CONTROL_PORT;
 use crate::protocol::mcast::INFO_REQUEST_PORT;
 use crate::protocol::proto_arc::PORT as ARC_PORT;
 use crate::protocol::proto_cmc::PORT as CMC_PORT;
-use crate::{Channel, DeviceInfo};
+use crate::device_info::{Channel, DeviceInfo};
 
 fn create_self_info(
   app_name: &str,

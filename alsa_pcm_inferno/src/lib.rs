@@ -4,10 +4,11 @@ use alsa_sys_all::*;
 
 use futures_util::FutureExt;
 use inferno_aoip::utils::run_future_in_new_thread;
-use inferno_aoip::{
-    AtomicSample, Clock, DeviceId, DeviceServer, ExternalBufferParameters,
+use inferno_aoip::device_server::{
+    AtomicSample, Clock, DeviceServer, ExternalBufferParameters,
     MediaClock, RealTimeClockReceiver, Sample, Settings,
 };
+use inferno_aoip::device_info::DeviceId;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use libc::{

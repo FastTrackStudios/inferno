@@ -3,8 +3,8 @@ use crate::net_utils::MTU;
 use crate::util::os::set_current_thread_realtime;
 use crate::util::real_time_box_channel::RealTimeBoxReceiver;
 use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RingBufferShared};
-use crate::samples_utils::*;
-use crate::{common::*, MediaClock};
+use super::samples_utils::*;
+use crate::{common::*, media_clock::MediaClock};
 
 use std::io::ErrorKind::WouldBlock;
 use std::net::SocketAddr;

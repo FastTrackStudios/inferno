@@ -3,7 +3,7 @@ use log::{error, info};
 use std::io::Write;
 use std::{fs::File, mem::size_of};
 
-use inferno_aoip::{DeviceServer, Sample, Settings};
+use inferno_aoip::device_server::{DeviceServer, Sample, Settings};
 
 const ABOUT: &str = "Inferno2pipe
 Copyright (C) 2023-2025 Teodor Wozniak

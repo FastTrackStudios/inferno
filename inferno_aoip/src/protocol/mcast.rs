@@ -1,7 +1,6 @@
 use binary_layout::prelude::*;
 
 use crate::byte_utils::*;
-use crate::info_mcast_server::MulticastMessage;
 
 pub const HEADER_LENGTH: usize = 32;
 pub const INFO_REQUEST_PORT: u16 = 8700;
@@ -40,6 +39,13 @@ pub fn make_packet<'a>(
   view.opcode_mut().copy_from_slice(&opcode);
   view.content_mut().copy_from_slice(&content);
   return view.into_storage();
+}
+
+
+pub struct MulticastMessage {
+  pub start_code: u16,
+  pub opcode: [u8; 8],
+  pub content: Vec<u8>,
 }
 
 pub fn make_channel_change_notification(

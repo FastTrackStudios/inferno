@@ -4,7 +4,7 @@ use binary_serde::BinarySerde;
 use bytebuffer::ByteBuffer;
 use log::error;
 
-use crate::{byte_utils::make_u16, DeviceInfo};
+use crate::{byte_utils::make_u16, device_info::DeviceInfo};
 
 use super::req_resp::{Connection, HEADER_LENGTH};
 

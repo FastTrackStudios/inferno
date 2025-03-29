@@ -1,14 +1,13 @@
-use crate::flows_rx::FlowInfo;
 use crate::net_utils::{create_mio_udp_socket, MAX_PAYLOAD_BYTES};
 use crate::protocol::mcast::make_channel_change_notification;
-use crate::samples_collector::SamplesCollector;
+use super::samples_collector::SamplesCollector;
 use crate::state_storage::StateStorage;
-use crate::MediaClock;
+use crate::media_clock::MediaClock;
 use crate::{common::*, mdns_client::AdvertisedChannel, protocol::flows_control::FlowHandle};
 
 use crate::device_info::DeviceInfo;
 use crate::{
-  flows_rx::FlowsReceiver, info_mcast_server::MulticastMessage, mdns_client::MdnsClient,
+  protocol::mcast::MulticastMessage, mdns_client::MdnsClient,
   protocol::flows_control::FlowsControlClient,
 };
 
@@ -33,6 +32,8 @@ use std::{
   time::{Duration, Instant},
 };
 use tokio::{sync::mpsc, time::sleep, time::timeout};
+
+use super::flows_rx::{FlowInfo, FlowsReceiver};
 
 const REORDER_WAIT_SAMPLES: usize = 4800;
 

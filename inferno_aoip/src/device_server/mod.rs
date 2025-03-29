@@ -1,18 +1,10 @@
-use crate::channels_subscriber::{
-  ChannelsBuffering, ChannelsSubscriber, ExternalBuffering, OwnedBuffering,
-};
-use crate::flows_tx::FlowsTransmitter;
-use crate::info_mcast_server::MulticastMessage;
 use crate::mdns_client::MdnsClient;
 use crate::media_clock::{
   async_clock_receiver_to_realtime, make_shared_media_clock, start_clock_receiver, ClockReceiver,
 };
-use crate::peaks::peaks_of_buffers;
 use crate::ring_buffer::{
-  self, ExternalBufferParameters, OwnedBuffer, ProxyToBuffer, ProxyToSamplesBuffer, RBOutput,
+  self, OwnedBuffer, ProxyToBuffer, ProxyToSamplesBuffer, RBOutput,
 };
-use crate::samples_collector::{RealTimeSamplesReceiver, SamplesCallback, SamplesCollector};
-use crate::settings::Settings;
 use crate::state_storage::StateStorage;
 use atomic::Atomic;
 use futures::{Future, FutureExt};
@@ -28,8 +20,38 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast as broadcast_queue, mpsc, watch};
 
 use crate::device_info::DeviceInfo;
-use crate::flows_control_server::FlowInfo as TXFlowInfo;
-use crate::{common::*, MediaClock, RealTimeClockReceiver};
+use crate::common::*;
+
+
+pub(crate) mod arc_server;
+pub(crate) mod cmc_server;
+pub(crate) mod info_mcast_server;
+pub(crate) mod flows_control_server;
+pub(crate) mod mdns_server;
+
+pub(crate) mod channels_subscriber;
+pub(crate) mod flows_tx;
+pub(crate) mod flows_rx;
+mod peaks;
+pub(crate) mod samples_collector;
+pub(crate) mod samples_utils;
+pub(crate) mod settings;
+
+
+pub use crate::common::{Clock, ClockDiff, Sample};
+pub use crate::media_clock::{MediaClock, RealTimeClockReceiver};
+pub use crate::ring_buffer::{ExternalBufferParameters, PositionReportDestination};
+pub use settings::Settings;
+pub type AtomicSample = atomic::Atomic<Sample>;
+
+
+use flows_control_server::FlowInfo as TXFlowInfo;
+use channels_subscriber::{
+  ChannelsBuffering, ChannelsSubscriber, ExternalBuffering, OwnedBuffering,
+};
+use samples_collector::{RealTimeSamplesReceiver, SamplesCallback, SamplesCollector};
+use peaks::peaks_of_buffers;
+
 
 const PEAKS_BUFFER_LEN: usize = 24000;
 const PEAKS_ITER_SLEEP: Duration = Duration::from_millis(100);
@@ -41,21 +63,19 @@ pub struct DeviceServer {
   clock_receiver: ClockReceiver,
   shared_media_clock: Arc<RwLock<MediaClock>>,
   mdns_client: Arc<MdnsClient>,
-  mcast_tx: mpsc::Sender<MulticastMessage>,
+  mcast_tx: mpsc::Sender<crate::protocol::mcast::MulticastMessage>,
   tx_latency_ns: u32,
   channels_sub_tx: watch::Sender<Option<Arc<ChannelsSubscriber>>>,
   tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>>,
   rx_peaks_supplier: Arc<RwLock<Box<dyn Fn() -> Vec<u8> + Send + Sync>>>,
   tx_peaks_supplier: Arc<RwLock<Box<dyn Fn() -> Vec<u8> + Send + Sync>>>,
-  //tx_inputs: Vec<RBInput<Sample, P>>,
-  //tasks: Vec<JoinHandle<()>>,
   shutdown_todo: Pin<Box<dyn Future<Output = ()> + Send>>,
   tx_shutdown_todo: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
   rx_shutdown_todo: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
 impl DeviceServer {
-  pub async fn start(settings: Settings) -> Self {
+  pub async fn start(settings: settings::Settings) -> Self {
     let self_info = Arc::new(settings.self_info);
     let state_storage = Arc::new(StateStorage::new(&self_info));
     let ref_instant = Instant::now();
@@ -63,7 +83,7 @@ impl DeviceServer {
     let (shutdown_send, shdn_recv1) = broadcast_queue::channel(16);
     let shdn_recv2 = shutdown_send.subscribe();
     let shdn_recv3 = shutdown_send.subscribe();
-    let mdns_handle = Arc::new(crate::mdns_server::DeviceMDNSResponder::start(self_info.clone()));
+    let mdns_handle = Arc::new(mdns_server::DeviceMDNSResponder::start(self_info.clone()));
 
     let mdns_client = Arc::new(crate::mdns_client::MdnsClient::new(self_info.ip_address));
     let (mcast_tx, mcast_rx) = mpsc::channel(100);
@@ -89,7 +109,7 @@ impl DeviceServer {
     let txps = tx_peaks_supplier.clone();
     let rxps = rx_peaks_supplier.clone();
     tasks.append(&mut vec![
-      tokio::spawn(crate::arc_server::run_server(
+      tokio::spawn(arc_server::run_server(
         self_info.clone(),
         state_storage.clone(),
         mdns_handle.clone(),
@@ -98,8 +118,8 @@ impl DeviceServer {
         tx_flows_info.clone(),
         shdn_recv1,
       )),
-      tokio::spawn(crate::cmc_server::run_server(self_info.clone(), shdn_recv2)),
-      tokio::spawn(crate::info_mcast_server::run_server(
+      tokio::spawn(cmc_server::run_server(self_info.clone(), shdn_recv2)),
+      tokio::spawn(info_mcast_server::run_server(
         self_info.clone(),
         mcast_rx,
         shared_media_clock.clone(),
@@ -195,7 +215,7 @@ impl DeviceServer {
     } else {
       (None, None)
     };
-    let (flows_rx_handle, flows_rx_thread) = crate::flows_rx::FlowsReceiver::start(
+    let (flows_rx_handle, flows_rx_thread) = flows_rx::FlowsReceiver::start(
       self.self_info.clone(),
       self.get_realtime_clock_receiver(),
       self.ref_instant,
@@ -259,7 +279,7 @@ impl DeviceServer {
   ) {
     let clock_rx = self.clock_receiver.subscribe();
 
-    let (flows_tx_handle, flows_tx_thread) = FlowsTransmitter::start(
+    let (flows_tx_handle, flows_tx_thread) = flows_tx::FlowsTransmitter::start(
       self.self_info.clone(),
       clock_rx,
       rb_outputs.clone(),
@@ -268,7 +288,7 @@ impl DeviceServer {
       on_transfer,
     );
     let (shutdown_send, shutdown_recv) = broadcast_queue::channel(16);
-    let flows_control_task = tokio::spawn(crate::flows_control_server::run_server(
+    let flows_control_task = tokio::spawn(flows_control_server::run_server(
       self.self_info.clone(),
       flows_tx_handle,
       self.tx_flows_info.clone(),
@@ -317,11 +337,6 @@ impl DeviceServer {
       self.shared_media_clock.read().unwrap().get_overlay().clone(),
     )
   }
-
-  /* pub fn take_tx_inputs(&mut self) -> Vec<RBInput<Sample, P>> {
-    unimplemented!()
-    //std::mem::take(&mut self.tx_inputs)
-  } */
 
   pub async fn shutdown(self) {
     info!("shutting down");

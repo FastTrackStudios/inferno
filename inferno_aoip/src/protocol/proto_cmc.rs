@@ -1,4 +1,4 @@
-use crate::DeviceId;
+use crate::device_info::DeviceId;
 
 pub const PORT: u16 = 8800;
 

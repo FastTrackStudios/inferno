@@ -15,14 +15,14 @@ use tokio::{select, sync::mpsc};
 
 use crate::util::os::set_current_thread_realtime;
 use crate::ring_buffer::{ProxyToSamplesBuffer, RBOutput};
-use crate::samples_utils::*;
+use super::samples_utils::*;
 use crate::util::thread::run_future_in_new_thread;
-use crate::{common::*, DeviceInfo};
+use crate::{common::*, device_info::DeviceInfo};
 use crate::{
   media_clock::{ClockOverlay, MediaClock},
   net_utils::MTU,
   protocol::flows_control::FlowHandle,
-  Sample,
+  common::Sample,
 };
 
 pub const FPP_MIN: u16 = 2;
