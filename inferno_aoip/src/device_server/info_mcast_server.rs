@@ -118,7 +118,7 @@ impl<'s> Multicaster<'s> {
     // 0x16:
     //       0x10 - has Manufacturer name
     //       0x40 - Network is configurable (supports static addressing)
-    // 0x17: Identify device, Sample rate & encoding configuration (was 0xdb)
+    // 0x17: Identify device, Sample rate & encoding configuration, Reboot, Factory reset (was 0xdb)
     content[0x14] = 0;
     content[0x15] = 0;
     content[0x16] = 0x10;

@@ -24,7 +24,9 @@ pub mod channels_and_flows_count {
     pub unknown1_0: u8,
     #[bits(1)]
     pub supports_tx_channel_rename: bool,
-    #[bits(3)]
+    #[bits(1)]
+    pub supports_tx_multicast: bool,
+    #[bits(2)]
     pub unknown2_0: u8,
   }
 
@@ -35,7 +37,7 @@ pub mod channels_and_flows_count {
     pub tx_channels_count: u16,
     pub rx_channels_count: u16,
     pub unknown2_4: u16, // or 1
-    pub unknown3_4: u16, // or 8
+    pub max_channels_in_flow: u16,
     pub unknown4_8: u16,
     pub max_tx_flows: u16,
     pub max_rx_flows: u16,
@@ -166,10 +168,10 @@ pub mod rename_rx_channels {
 }
 
 #[derive(Debug, binary_serde::BinarySerde, Default)]
-pub struct ReceiverSocketDescriptor {
+pub struct DestinationSocketDescriptor {
   pub unknown1_8002: u16,
-  pub rx_port: u16,
-  pub rx_addr: [u8; 4],
+  pub port: u16,
+  pub addr: [u8; 4],
 }
 
 pub mod query_tx_flows {
@@ -183,7 +185,7 @@ pub mod query_tx_flows {
     pub remote_rx_flow_name_offset: u16,
     pub unknown3_10: u16, // or 0x3c ???
     pub local_tx_flow_name_offset: u16,
-    pub unknown4_0: [u8; 8],
+    pub unknown4_0: [u8; 8], // in multicast flows first 4B are latency_ns
   }
 
   #[derive(Debug, binary_serde::BinarySerde, Default)]
@@ -203,6 +205,36 @@ pub mod query_tx_flows {
     pub names_descriptor_offset: u16,
   }
 }
+
+pub mod create_multicast_tx_flow {
+  pub const OPCODE: u16 = 0x2201;
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct FlowDescriptorHeader {
+    pub flow_id: u16,
+    pub flow_type: u16,
+    pub unknown1_0: [u8; 10],
+    pub channels_count: u16,
+  }
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct FlowDescriptorFooter {
+    pub mostly_zeros_offset: u16,
+  }
+
+  #[derive(Debug, binary_serde::BinarySerde, Default)]
+  pub struct MostlyZeros {
+    pub unknown1_a00: u16,
+    pub unknown2_0: [u8; 14],
+    pub unknown3_1: u16,
+    pub unknown4_0: u16,
+  }
+}
+
+pub mod delete_multicast_tx_flow {
+  pub const OPCODE: u16 = 0x2202;
+}
+
 
 pub mod query_rx_flows {
   pub const OPCODE: u16 = 0x3200;
@@ -316,7 +348,7 @@ pub fn paginate_make_response<InItem, OutItem>(
     Some(v) => v,
     None => {
       error!("unable to extract start index from request payload {}", hex::encode(request_payload));
-      return (0 /* TODO */, vec![]);
+      return (0xFFFF /* TODO */, vec![]);
     }
   };
   let (have_more, bytes) = serialize_items(space_items, source.into_iter().skip(start_index), transform);

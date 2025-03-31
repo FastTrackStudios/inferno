@@ -28,6 +28,14 @@ pub fn write_0term_str_to_bytebuffer(bytes: &mut ByteBuffer, s: &str) -> u16 {
   return offset.try_into().unwrap();
 }
 
+pub fn write_0term_str_or_0_to_bytebuffer(bytes: &mut ByteBuffer, s: Option<&str>) -> u16 {
+  if let Some(s) = s {
+    write_0term_str_to_bytebuffer(bytes, s)
+  } else {
+    0
+  }
+}
+
 pub fn align_wpos(bytes: &mut ByteBuffer, alignment: usize) {
   while (bytes.get_wpos() % alignment) != 0 {
     bytes.write_u8(0);

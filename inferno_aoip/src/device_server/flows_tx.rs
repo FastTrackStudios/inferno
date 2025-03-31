@@ -1,7 +1,7 @@
-use std::net::{IpAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::num::Wrapping;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::{collections::BTreeMap, net::SocketAddr, sync::atomic::AtomicU32, time::Duration};
 
@@ -48,7 +48,7 @@ struct Flow {
   next_ts: Clock,
   fpp: usize,
   bytes_per_sample: usize,
-  expires: Clock,
+  expires: Option<Clock>,
   expired: Arc<AtomicBool>,
 }
 
@@ -58,7 +58,9 @@ impl Flow {
     self.next_ts = now.wrapping_add(self.fpp as Clock - remainder);
   }
   fn keep_alive(&mut self, now: Clock, sample_rate: u32) {
-    self.expires = now.wrapping_add(KEEPALIVE_TIMEOUT_SECONDS * sample_rate as Clock);
+    self.expires.as_mut().map(|expires| {
+      *expires = now.wrapping_add(KEEPALIVE_TIMEOUT_SECONDS * sample_rate as Clock);
+    });
   }
 }
 
@@ -72,6 +74,7 @@ enum Command {
     channel_indices: Vec<Option<usize>>,
     fpp: usize,
     bytes_per_sample: usize,
+    needs_keepalives: bool,
     expired: Arc<AtomicBool>,
   },
   RemoveFlow {
@@ -177,10 +180,10 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
             warn!("send returned error");
           }
         }
-        if process_events {
+        if process_events && flow.expires.is_some() {
           if let Ok(_) = flow.socket.recv(&mut pbuff) {
             flow.keep_alive(now, sample_rate);
-          } else if wrapped_diff(flow.expires, now) < 0 {
+          } else if wrapped_diff(flow.expires.unwrap(), now) < 0 {
             flow.expired.store(true, Ordering::Release);
             info!("flow dst {:?} expired", flow.socket.peer_addr().ok());
           }
@@ -259,12 +262,22 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         Command::Shutdown => {
           break;
         }
-        Command::AddFlow { index, socket, channel_indices, fpp, bytes_per_sample, expired } => {
+        Command::AddFlow { index, socket, channel_indices, fpp, bytes_per_sample, needs_keepalives, expired } => {
           let mut flow =
-            Flow { socket, channel_indices, next_ts: 0, fpp, bytes_per_sample, expires: 0, expired };
+            Flow {
+              socket,
+              channel_indices,
+              next_ts: 0,
+              fpp,
+              bytes_per_sample,
+              expires: if needs_keepalives { Some(0) } else { None },
+              expired
+            };
           if let Some(now) = self.now() {
             flow.bootstrap_next_ts(now);
-            flow.keep_alive(now, self.sample_rate);
+            if needs_keepalives {
+              flow.keep_alive(now, self.sample_rate);
+            }
           }
           let previous = std::mem::replace(&mut self.flows[index], Some(flow));
           debug_assert!(previous.is_none());
@@ -310,12 +323,28 @@ struct FlowData {
   expired: Arc<AtomicBool>,
 }
 
+#[derive(Debug)]
+pub struct FlowInfo {
+  pub rx_hostname: Option<String>,
+  pub rx_flow_name: Option<String>,
+  pub dst_addr: Ipv4Addr,
+  pub dst_port: u16,
+  pub local_channel_indices: Vec<Option<usize>>,
+}
+
+impl FlowInfo {
+  fn is_multicast(&self) -> bool {
+    self.rx_hostname.is_none() && self.rx_flow_name.is_none()
+  }
+}
+
 pub struct FlowsTransmitter {
   self_info: Arc<DeviceInfo>,
   flow_seq_id: AtomicU32,
   flows: BTreeMap<u32, FlowData>,
   ip_port_to_id: BTreeMap<SocketAddr, u32>,
   commands_sender: mpsc::Sender<Command>,
+  flows_info: Vec<Option<FlowInfo>>,
 }
 
 fn split_handle(h: FlowHandle) -> (u32, u16) {
@@ -346,14 +375,6 @@ impl FlowsTransmitter {
         .unwrap(),
       current_timestamp,
       on_transfer,
-      /* callback: Box::new(|mut timestamp: Clock, ch_index: usize, buffer: &mut [Sample]| {
-        let period = 4 << ch_index;
-        for sample in buffer {
-          let angle = 2.0 * PI * (timestamp % period) as f64 / (period as f64);
-          *sample = (angle.sin() * Sample::MAX as f64).round() as Sample;
-          timestamp = timestamp.wrapping_add(1);
-        }
-      }) */
     };
     internal.run(start_time_rx).await;
   }
@@ -404,6 +425,7 @@ impl FlowsTransmitter {
         flow_seq_id: 0.into(),
         flows: BTreeMap::new(),
         ip_port_to_id: BTreeMap::new(),
+        flows_info: (0..MAX_FLOWS).map(|_| None).collect_vec(),
       },
       thread_join,
     );
@@ -412,21 +434,37 @@ impl FlowsTransmitter {
     self.commands_sender.send(Command::Shutdown).await.log_and_forget();
   }
 
+  pub fn destination_exists(&self, dst_addr: Ipv4Addr, dst_port: u16) -> bool {
+    let socket_addr = SocketAddr::new(IpAddr::V4(dst_addr), dst_port);
+    self.ip_port_to_id.contains_key(&socket_addr)
+  }
   pub async fn add_flow(
     &mut self,
-    dst_addr: SocketAddr,
-    channel_indices: impl IntoIterator<Item = Option<usize>>,
+    flow_info: FlowInfo,
     fpp: usize,
     bytes_per_sample: usize,
+    requested_flow_index: Option<u32>,
+    is_multicast: bool,
   ) -> Result<(usize, FlowHandle), std::io::Error> {
-    let (flow_number, cookie) = match self.ip_port_to_id.get(&dst_addr) {
+    let channel_indices = flow_info.local_channel_indices.clone();
+    let dst_addr = SocketAddr::new(IpAddr::V4(flow_info.dst_addr), flow_info.dst_port);
+    let (flow_index, cookie) = match self.ip_port_to_id.get(&dst_addr) {
       None => {
         self.scan_expired().await;
         let mut counter = 0;
-        let flow_number = loop {
-          let flow_number = self.flow_seq_id.fetch_add(1, atomic::Ordering::AcqRel) % MAX_FLOWS;
-          if !self.flows.contains_key(&flow_number) {
-            break flow_number;
+        let flow_index = loop {
+          let flow_index = requested_flow_index.unwrap_or_else(|| self.flow_seq_id.fetch_add(1, atomic::Ordering::AcqRel) % MAX_FLOWS);
+          if !self.flows.contains_key(&flow_index) {
+            if requested_flow_index.is_some() && self.flows_info[flow_index as usize].is_some() {
+              error!("requested flow index which is reserved: {flow_index}");
+              return Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy));
+            } else {
+              break flow_index;
+            }
+          }
+          if requested_flow_index.is_some() {
+            error!("requested flow index which is already in use: {flow_index}");
+            return Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy));
           }
           counter += 1;
           if counter > MAX_FLOWS {
@@ -437,7 +475,8 @@ impl FlowsTransmitter {
         let flow = FlowData {
           cookie: thread_rng().gen(),
           remote: dst_addr.clone(),
-          expired: Arc::new(AtomicBool::new(false)),
+          // we're adding multicast flow as 'expired' to give it grace period for multicast address collission detection
+          expired: Arc::new(AtomicBool::new(is_multicast)),
         };
 
         let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(self.self_info.ip_address), 0))?;
@@ -448,52 +487,70 @@ impl FlowsTransmitter {
         self
           .commands_sender
           .send(Command::AddFlow {
-            index: flow_number as usize,
+            index: flow_index as usize,
             socket,
-            channel_indices: channel_indices.into_iter().collect_vec(),
+            channel_indices: channel_indices.clone(),
             fpp,
             bytes_per_sample,
+            needs_keepalives: !is_multicast,
             expired: flow.expired.clone(),
           })
           .await
           .unwrap();
 
         let cookie = flow.cookie;
-        self.flows.insert(flow_number, flow);
-        (flow_number, cookie)
+        self.flows.insert(flow_index, flow);
+        (flow_index, cookie)
       }
-      Some(&flow_number) => {
+      Some(&flow_index) => {
         warn!("got add flow request for already existing flow, setting channels instead");
         // TODO FIXME what if fpp or bytes_per_sample change?
         self
           .commands_sender
           .send(Command::SetChannels {
-            index: flow_number as usize,
-            channel_indices: channel_indices.into_iter().collect_vec(),
+            index: flow_index as usize,
+            channel_indices: channel_indices.clone(),
           })
           .await
           .unwrap();
-        (flow_number, self.flows.get(&flow_number).unwrap().cookie)
+        (flow_index, self.flows.get(&flow_index).unwrap().cookie)
       }
     };
 
-    self.ip_port_to_id.insert(dst_addr, flow_number);
+    self.ip_port_to_id.insert(dst_addr, flow_index);
 
     let mut flow_handle = [0u8; 6];
-    flow_handle[0..4].copy_from_slice(&flow_number.to_be_bytes());
+    flow_handle[0..4].copy_from_slice(&flow_index.to_be_bytes());
     flow_handle[4..6].copy_from_slice(&cookie.to_be_bytes());
 
-    Ok((flow_number as usize, flow_handle))
+    self.flows_info[flow_index as usize] = Some(flow_info);
+
+    Ok((flow_index as usize, flow_handle))
   }
+  pub fn activate_multicast_flow(&mut self, flow_index: u32) {
+    // this is called for multicast flows after grace period
+    self.flows.get(&flow_index).as_ref().unwrap().expired.store(false, Ordering::Release);
+  }
+  pub fn random_multicast_destination(&self) -> (Ipv4Addr, u16) {
+    loop {
+      let port = 4321;
+      let ip = Ipv4Addr::new(239, 255, thread_rng().gen(), thread_rng().gen());
+      if !self.destination_exists(ip, port) {
+        return (ip, port);
+      }
+    }
+  }
+
   fn get_flow(&self, handle: FlowHandle) -> Option<(u32, &FlowData)> {
     let (id, cookie) = split_handle(handle);
     self.flows.get(&id).filter(|flow| flow.cookie == cookie).map(|flow| (id, flow))
   }
-  async fn remove_flow_internal(&mut self, id: u32) {
-    if let Some(flow) = self.flows.remove(&id) {
+  async fn remove_flow_internal(&mut self, index: u32) {
+    if let Some(flow) = self.flows.remove(&index) {
       self.ip_port_to_id.remove(&flow.remote);
     }
-    self.commands_sender.send(Command::RemoveFlow { index: id as usize }).await.unwrap();
+    self.flows_info[index as usize] = None;
+    self.commands_sender.send(Command::RemoveFlow { index: index as usize }).await.unwrap();
   }
   pub async fn remove_flow(&mut self, handle: FlowHandle) -> Result<usize, std::io::Error> {
     if let Some((id, _)) = self.get_flow(handle) {
@@ -503,21 +560,37 @@ impl FlowsTransmitter {
       Err(std::io::Error::from(std::io::ErrorKind::NotFound))
     }
   }
+  pub async fn remove_multicast_flow(&mut self, index: u32) -> Result<(), std::io::Error> {
+    if let Some(Some(info)) = self.flows_info.get(index as usize).as_ref() {
+      if info.rx_flow_name.is_none() && info.rx_hostname.is_none() {
+        self.remove_flow_internal(index).await;
+        Ok(())
+      } else {
+        error!("trying to remove non-multicast flow which can be only managed using a handle");
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+      }
+    } else {
+      Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
+  }
   pub async fn set_channels(
     &mut self,
     handle: FlowHandle,
     channel_indices: impl IntoIterator<Item = Option<usize>>,
   ) -> Result<usize, std::io::Error> {
-    if let Some((id, _)) = self.get_flow(handle) {
+    if let Some((index, _)) = self.get_flow(handle) {
+      let channel_indices = channel_indices.into_iter().collect_vec();
       self
         .commands_sender
         .send(Command::SetChannels {
-          index: id as usize,
-          channel_indices: channel_indices.into_iter().collect_vec(),
+          index: index as usize,
+          channel_indices: channel_indices.clone(),
         })
         .await
         .unwrap();
-      Ok(id as usize)
+
+        self.flows_info[index as usize].as_mut().unwrap().local_channel_indices = channel_indices;
+      Ok(index as usize)
     } else {
       Err(std::io::Error::from(std::io::ErrorKind::NotFound))
     }
@@ -526,10 +599,10 @@ impl FlowsTransmitter {
     let expired_ids: Vec<u32> = self
       .flows
       .iter()
-      .filter_map(|(id, flow)| {
-        if flow.expired.load(Ordering::Acquire) {
-          info!("removing expired flow (internal id {id}) dst {}", flow.remote);
-          Some(*id)
+      .filter_map(|(index, flow)| {
+        if flow.expired.load(Ordering::Acquire) && !self.flows_info[*index as usize].as_ref().unwrap().is_multicast() {
+          info!("removing expired flow (internal id {index}) dst {}", flow.remote);
+          Some(*index)
         } else {
           None
         }
@@ -541,5 +614,8 @@ impl FlowsTransmitter {
   }
   pub fn is_empty(&self) -> bool {
     self.flows.is_empty()
+  }
+  pub fn get_flows_info(&self) -> &Vec<Option<FlowInfo>> {
+    &self.flows_info
   }
 }

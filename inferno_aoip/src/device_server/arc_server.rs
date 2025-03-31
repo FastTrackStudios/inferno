@@ -1,10 +1,12 @@
 use super::channels_subscriber::ChannelsSubscriber;
+use super::tx_multicasts::TransmitMulticasts;
+use crate::mdns_client::MdnsClient;
 use crate::{byte_utils::*, net_utils};
 
 use crate::device_info::DeviceInfo;
-use super::flows_control_server::FlowInfo as TXFlowInfo;
+use super::flows_tx::{FlowInfo as TXFlowInfo, FPP_MAX_ADVERTISED};
 use super::flows_rx::MAX_FLOWS as MAX_RX_FLOWS;
-use super::flows_tx::MAX_FLOWS as MAX_TX_FLOWS;
+use super::flows_tx::{FlowsTransmitter, MAX_CHANNELS_IN_FLOW, MAX_FLOWS as MAX_TX_FLOWS};
 use crate::protocol::mcast::MulticastMessage;
 use super::mdns_server::DeviceMDNSResponder;
 use crate::net_utils::UdpSocketWrapper;
@@ -18,12 +20,14 @@ use binary_serde::recursive_array::RecursiveArray as _;
 use binary_serde::BinarySerde;
 use bytebuffer::{ByteBuffer, Endian};
 use itertools::Itertools;
-use log::{error, info, trace};
+use log::{error, info, trace, warn};
+use rand::{thread_rng, Rng as _};
+use std::net::Ipv4Addr;
 use std::sync::RwLock;
 use std::{cmp::min, sync::Arc};
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex};
 
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
@@ -31,7 +35,8 @@ pub async fn run_server(
   mdns_server: Arc<DeviceMDNSResponder>,
   mcast: Sender<MulticastMessage>,
   mut channels_sub_rx: watch::Receiver<Option<Arc<ChannelsSubscriber>>>,
-  tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>>,
+  flows_tx: Arc<Mutex<Option<FlowsTransmitter>>>,
+  tx_multicasts: Arc<Mutex<Option<TransmitMulticasts>>>,
   shutdown: BroadcastReceiver<()>,
 ) {
   let mut subscriber = None;
@@ -59,11 +64,11 @@ pub async fn run_server(
           let total_channels_wtf = self_info.tx_channels.len() + self_info.rx_channels.len(); // ??? not actually total number of channels but in some devices it is
           let response = channels_and_flows_count::Response {
             unknown1_0: 0,
-            flags2: channels_and_flows_count::Flags2 { supports_tx_channel_rename: true, ..Default::default() },
+            flags2: channels_and_flows_count::Flags2 { supports_tx_channel_rename: true, supports_tx_multicast: true, ..Default::default() },
             tx_channels_count: self_info.tx_channels.len().try_into().unwrap(),
             rx_channels_count: self_info.rx_channels.len().try_into().unwrap(),
             unknown2_4: 4, // or 1
-            unknown3_4: 4, // or 8
+            max_channels_in_flow: MAX_CHANNELS_IN_FLOW.min(self_info.tx_channels.len().try_into().unwrap()), // or 8
             unknown4_8: 8,
             max_tx_flows: MAX_TX_FLOWS.try_into().unwrap(),
             max_rx_flows: MAX_RX_FLOWS.try_into().unwrap(),
@@ -237,7 +242,7 @@ pub async fn run_server(
             conn.respond_with_code(1, &[0, 0]).await;
             // sometimes it is [0, 1, 0, 0, H(channel_id), L(channel_id)], but it doesn't look necessary
           } else {
-            conn.respond_with_code(0 /* TODO: really? */, &[]).await;
+            conn.respond_with_code(0xFFFF /* TODO: really? */, &[]).await;
           }
         }
         rename_rx_channels::OPCODE => {
@@ -269,7 +274,7 @@ pub async fn run_server(
             }
           });
           mcast.send(make_channel_change_notification(renamed_indices)).await.log_and_forget();
-          conn.respond_with_code(if renamed_any { 1 } else { 0 /* TODO */}, &[]).await;
+          conn.respond_with_code(if renamed_any { 1 } else { 0xFFFF /* TODO */}, &[]).await;
         }
         query_tx_flows::OPCODE => {
           // query TX flows
@@ -278,21 +283,22 @@ pub async fn run_server(
             &mut conn,
             content,
             MAX_TX_FLOWS.min(16).try_into().unwrap(),
-            tx_flows_info.read().unwrap().iter().enumerate(),
+            flows_tx.lock().await.as_ref().map(|tx|tx.get_flows_info()).unwrap_or(&vec![]).iter().enumerate(),
             |(flow_index, flow_opt), bytes| -> Option<u16> {
               flow_opt.as_ref().map(|flow_info| -> u16 {
                 let flow_id = flow_index + 1;
                 let flow_name = format!("{}_{}", flow_id, self_info.process_id);
                 let local_tx_flow_name_offset = write_0term_str_to_bytebuffer(bytes, &flow_name);
-                let remote_hostname_offset = write_0term_str_to_bytebuffer(bytes, &flow_info.rx_hostname);
-                let remote_rx_flow_name_offset = write_0term_str_to_bytebuffer(bytes, &flow_info.rx_flow_name);
+                let remote_hostname_offset = write_0term_str_or_0_to_bytebuffer(bytes, flow_info.rx_hostname.as_deref());
+                let remote_rx_flow_name_offset = write_0term_str_or_0_to_bytebuffer(bytes, flow_info.rx_flow_name.as_deref());
+                let is_multicast = remote_hostname_offset == 0 && remote_rx_flow_name_offset == 0;
 
                 align_wpos(bytes, 4);
                 let receiver_socket_descriptor_offset = bytes.get_wpos().try_into().unwrap();
-                bytes.write_bytes(ReceiverSocketDescriptor {
+                bytes.write_bytes(DestinationSocketDescriptor {
                   unknown1_8002: 0x8002,
-                  rx_port: flow_info.rx_port,
-                  rx_addr: flow_info.rx_addr.octets(),
+                  port: flow_info.dst_port,
+                  addr: flow_info.dst_addr.octets(),
                 }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
 
                 let names_descriptor_offset = bytes.get_wpos().try_into().unwrap();
@@ -309,7 +315,7 @@ pub async fn run_server(
                 let main_descriptor_offset = bytes.get_wpos();
                 bytes.write_bytes(query_tx_flows::FlowDescriptorHeader {
                   flow_id: flow_id.try_into().unwrap(),
-                  flow_type: 0x11,
+                  flow_type: if is_multicast { 2 } else { 0x11 },
                   sample_rate: self_info.sample_rate,
                   unknown1_0: 0,
                   bits_per_sample: self_info.bits_per_sample.into(),
@@ -332,14 +338,79 @@ pub async fn run_server(
           );
           conn.respond_with_code(code, &response).await;
         }
+        create_multicast_tx_flow::OPCODE => {
+          // Create multicast TX flow
+          let content = request.content();
+          let mut flow_ids = vec![];
+          for descr_offset in deserialize_items::<u16>(content) {
+            let descr_offset: usize = descr_offset.into();
+            if descr_offset-HEADER_LENGTH+create_multicast_tx_flow::FlowDescriptorHeader::SERIALIZED_SIZE > content.len() {
+              continue;
+            }
+            if let Ok(descr) = create_multicast_tx_flow::FlowDescriptorHeader::binary_deserialize(&content[descr_offset-HEADER_LENGTH..][..create_multicast_tx_flow::FlowDescriptorHeader::SERIALIZED_SIZE], binary_serde::Endianness::Big) {
+              if descr.flow_type != 2 {
+                error!("wanted to create unknown flow type {}", descr.flow_type);
+                continue;
+              }
+              if descr.flow_id==0 || descr.flow_id as usize > MAX_TX_FLOWS as _ {
+                error!("wanted to create multicast flow with invalid flow id: {}", descr.flow_id);
+                continue;
+              }
+              let flow_index = (descr.flow_id as usize)-1;
+              {
+                let mut flows_tx_opt = flows_tx.lock().await;
+                let flows_tx = if let Some(flows_tx) = flows_tx_opt.as_mut() {
+                  flows_tx
+                } else {
+                  error!("trying to create multicast flow but we have no flows transmitter active");
+                  continue;
+                };
+                if flows_tx.get_flows_info()[flow_index].is_some() {
+                  error!("flow id busy: {}", descr.flow_id);
+                  continue;
+                }
+              }
+              let after_header = &content[descr_offset-HEADER_LENGTH+create_multicast_tx_flow::FlowDescriptorHeader::SERIALIZED_SIZE..];
+              if after_header.len() < (descr.channels_count as usize)+create_multicast_tx_flow::FlowDescriptorFooter::SERIALIZED_SIZE {
+                error!("multicast tx flow descriptor parse failed, too short channels list or footer");
+                continue;
+              }
+              let channels_bytes = &after_header[..(descr.channels_count as usize)*2];
+              let channel_indices = channels_bytes.chunks_exact(2)
+                .map(|chunk|u16::from_be_bytes(chunk.try_into().unwrap()))
+                .map(|id| if id > 0 { Some((id - 1).try_into().unwrap()) } else { None })
+                .collect_vec();
+
+              if let Some(txm) = tx_multicasts.lock().await.as_ref() {
+                txm.add_flow(flow_index, channel_indices).await;
+              } else {
+                error!("tx_multicasts None but got add multicast request");
+                continue;
+              }
+              flow_ids.push(flow_index + 1);
+            } else {
+              error!("failed to parse multicast flow descriptor");
+              continue;
+            }
+          }
+          if flow_ids.len() > 0 {
+            let mut response = ByteBuffer::new();
+            response.write_u16(flow_ids.len().try_into().unwrap());
+            response.write_u16(0);
+            for id in flow_ids {
+              response.write_u16(id.try_into().unwrap());
+            }
+            conn.respond(response.as_bytes()).await;
+          } else {
+            conn.respond_with_code(0xFFFF /* TODO */, &[]).await;
+          }
+        }
+
         0x2320 => {
           // ???
           conn.respond_with_code(0x30, &[]).await;
         }
 
-        0x2201 => {
-          // Create multicast TX flow
-        }
         query_rx_flows::OPCODE => {
           // query RX flows
           let content = request.content();
@@ -353,10 +424,10 @@ pub async fn run_server(
                 flow_opt.as_ref().map(|flow_info| -> u16 {
                   align_wpos(bytes, 4);
                   let receiver_socket_descriptor_offset = bytes.get_wpos().try_into().unwrap();
-                  bytes.write_bytes(ReceiverSocketDescriptor {
+                  bytes.write_bytes(DestinationSocketDescriptor {
                     unknown1_8002: 0x8002,
-                    rx_port: flow_info.rx_port,
-                    rx_addr: self_info.ip_address.octets(),
+                    port: flow_info.rx_port,
+                    addr: self_info.ip_address.octets(),
                   }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
 
                   let descriptor2_offset = bytes.get_wpos().try_into().unwrap();

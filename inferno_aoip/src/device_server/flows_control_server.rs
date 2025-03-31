@@ -1,7 +1,9 @@
 use crate::common::*;
+use crate::device_server::flows_tx::FlowInfo;
 use itertools::Itertools;
+use tokio::sync::Mutex;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc};
 
 use super::flows_tx::{FlowsTransmitter, FPP_MAX, MAX_FLOWS};
 use crate::protocol::flows_control::{FlowControlError, FlowHandle};
@@ -13,31 +15,15 @@ use crate::{
 };
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 
-#[derive(Debug)]
-pub struct FlowInfo {
-  pub rx_hostname: String,
-  pub rx_flow_name: String,
-  pub rx_addr: Ipv4Addr,
-  pub rx_port: u16,
-  pub local_channel_indices: Vec<Option<usize>>,
-}
-
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
-  mut flows: FlowsTransmitter,
-  flows_info: Arc<RwLock<Vec<Option<FlowInfo>>>>,
+  flows_tx: Arc<Mutex<Option<FlowsTransmitter>>>,
   shutdown: BroadcastReceiver<()>,
 ) {
   let server =
     UdpSocketWrapper::new(Some(self_info.ip_address), self_info.flows_control_port, shutdown).await;
   let mut conn = req_resp::Connection::new(server);
   let mut recv_buff = crate::net_utils::ReceiveBuffer::new();
-  assert!(flows.is_empty());
-  {
-    let mut flows_info = flows_info.write().unwrap();
-    flows_info.clear();
-    flows_info.extend((0..MAX_FLOWS).map(|_| None));
-  }
   while conn.should_work() {
     let request = match conn.recv(&mut recv_buff).await {
       Some(v) => v,
@@ -113,26 +99,24 @@ pub async fn run_server(
             conn.respond_with_code(0x0302u16 /* TODO */, &[]).await;
             continue;
           }
-          let result = flows
+          let flow_info = FlowInfo {
+            rx_hostname: hostname.into(),
+            rx_flow_name: rx_flow_name.into(),
+            dst_addr: rx_ip,
+            dst_port: rx_port,
+            local_channel_indices: channel_indices,
+          };
+          let result = flows_tx.lock().await.as_mut().unwrap()
             .add_flow(
-              SocketAddr::new(IpAddr::V4(rx_ip), rx_port),
-              channel_indices.clone(),
+              flow_info,
               fpp as usize,
               (bits_per_sample / 8) as usize,
+              None,
+              false,
             )
             .await;
           match result {
             Ok((flow_index, handle)) => {
-              {
-                let mut flows_info = flows_info.write().unwrap();
-                flows_info[flow_index] = Some(FlowInfo {
-                  rx_hostname: hostname.into(),
-                  rx_flow_name: rx_flow_name.into(),
-                  rx_addr: rx_ip,
-                  rx_port,
-                  local_channel_indices: channel_indices,
-                });
-              }
               conn.respond(&handle).await;
             }
             Err(e) => {
@@ -149,12 +133,8 @@ pub async fn run_server(
             error!("packet too short: {}", hex::encode(request.content()));
             continue;
           };
-          if let Ok(flow_index) = flows.remove_flow(handle).await {
+          if let Ok(flow_index) = flows_tx.lock().await.as_mut().unwrap().remove_flow(handle).await {
             info!("stopped flow {handle:?}");
-            {
-              let mut flows_info = flows_info.write().unwrap();
-              flows_info[flow_index] = None;
-            }
             conn.respond(&[]).await;
           } else {
             warn!("received stop flow request for unknown handle {handle:?}");
@@ -177,16 +157,8 @@ pub async fn run_server(
             })
             .collect_vec();
 
-          if let Ok(flow_index) = flows.set_channels(handle, channel_indices.clone()).await {
+          if let Ok(_flow_index) = flows_tx.lock().await.as_mut().unwrap().set_channels(handle, channel_indices.clone()).await {
             info!("set channels {channel_indices:?} in flow {handle:?}");
-            {
-              let mut flows_info = flows_info.write().unwrap();
-              if let Some(fi) = flows_info[flow_index].as_mut() {
-                fi.local_channel_indices = channel_indices;
-              } else {
-                error!("BUG: flows_info[{flow_index}] is None but handle was accepted");
-              }
-            }
             conn.respond(&[]).await;
           } else {
             warn!("received update flow request for unknown handle {handle:?}");
@@ -208,5 +180,5 @@ pub async fn run_server(
       error!("whole packet: {:?}", hex::encode(request.into_storage()));
     }
   }
-  flows.shutdown().await;
+  flows_tx.lock().await.as_mut().unwrap().shutdown().await;
 }

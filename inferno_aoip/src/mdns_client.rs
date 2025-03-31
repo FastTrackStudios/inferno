@@ -4,7 +4,7 @@ use std::{
   error::Error,
   io,
   net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-  str::{self},
+  str::{self}, time::Duration,
 };
 
 use searchfire::{
@@ -68,20 +68,56 @@ impl MdnsClient {
     &self,
     types: &[RecordType],
     fqdn: &Name,
+    timeout: Duration,
   ) -> Result<DnsResponse, Box<dyn Error>> {
     DiscoveryBuilder::new()
       .interface_v4(TargetInterface::Specific(self.listen_ip))
       .build(IpVersion::V4)
       .map_err(|e| Box::new(e))?
-      .single_query(types, fqdn)
+      .single_query(types, fqdn, timeout)
       .await
       .map_err(|e| Box::new(e).into())
+  }
+  async fn a_record_exists_single_check(&self, fqdn_parts: &[&str], timeout: Duration) -> Result<bool, Box<dyn Error>> {
+    debug!("checking if A record exists: {fqdn_parts:?}");
+    let fqdn = Name::from_labels(fqdn_parts.iter().map(|&s| s.as_bytes())).map_err(|e| Box::new(e))?;
+    match self.do_single_query(&[RecordType::A], &fqdn, timeout).await {
+      Ok(response) => {
+        for record in response.answers() {
+          if record.name().to_lowercase() != fqdn.to_lowercase() {
+            continue;
+          }
+          if let Some(rdata) = record.data() {
+            if let Some(addr) = rdata.as_a() {
+              return Ok(*addr != self.listen_ip); // skip own IP
+            }
+          }
+        }
+        Ok(true)
+      }
+      Err(_e) => Ok(false), // TODO: sometimes error may be other than timeout, handle that
+    }
+  }
+  pub async fn a_record_exists(&self, fqdn_parts: &[&str]) -> Result<bool, Box<dyn Error>> {
+    for _ in 0..3 {
+      let r = self.a_record_exists_single_check(fqdn_parts, Duration::from_millis(400)).await?;
+      if r { return Ok(r) };
+    }
+    Ok(false)
+  }
+  pub async fn is_multicast_ip_already_used(&self, addr: Ipv4Addr) -> Result<bool, Box<dyn Error>> {
+    let octets = addr.octets();
+    let name = [
+      &octets[3].to_string(), &octets[2].to_string(), &octets[1].to_string(), &octets[0].to_string(),
+      "in-addr", "local"
+    ];
+    self.a_record_exists(&name).await
   }
 
   pub async fn query(&self, fqdn_parts: &[&str]) -> Result<AdvertisedService, Box<dyn Error>> {
     debug!("resolving {fqdn_parts:?}");
     let fqdn = Name::from_labels(fqdn_parts.iter().map(|&s| s.as_bytes())).map_err(|e| Box::new(e))?;
-    let response = self.do_single_query(&[RecordType::SRV, RecordType::TXT], &fqdn).await?;
+    let response = self.do_single_query(&[RecordType::SRV, RecordType::TXT], &fqdn, Duration::from_secs(3)).await?;
     let mut target = None;
     let mut properties = BTreeMap::new();
     for record in response.answers() {

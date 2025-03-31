@@ -7,9 +7,12 @@ use crate::ring_buffer::{
 };
 use crate::state_storage::StateStorage;
 use atomic::Atomic;
+use flows_tx::FlowsTransmitter;
 use futures::{Future, FutureExt};
 use itertools::Itertools;
+use mdns_server::DeviceMDNSResponder;
 use tokio::task::JoinHandle;
+use tx_multicasts::TransmitMulticasts;
 
 use std::io::Write;
 use std::pin::Pin;
@@ -17,7 +20,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast as broadcast_queue, mpsc, watch};
+use tokio::sync::{broadcast as broadcast_queue, mpsc, watch, Mutex};
 
 use crate::device_info::DeviceInfo;
 use crate::common::*;
@@ -36,6 +39,7 @@ mod peaks;
 pub(crate) mod samples_collector;
 pub(crate) mod samples_utils;
 pub(crate) mod settings;
+pub(crate) mod tx_multicasts;
 
 
 pub use crate::common::{Clock, ClockDiff, Sample};
@@ -44,8 +48,6 @@ pub use crate::ring_buffer::{ExternalBufferParameters, PositionReportDestination
 pub use settings::Settings;
 pub type AtomicSample = atomic::Atomic<Sample>;
 
-
-use flows_control_server::FlowInfo as TXFlowInfo;
 use channels_subscriber::{
   ChannelsBuffering, ChannelsSubscriber, ExternalBuffering, OwnedBuffering,
 };
@@ -63,10 +65,12 @@ pub struct DeviceServer {
   clock_receiver: ClockReceiver,
   shared_media_clock: Arc<RwLock<MediaClock>>,
   mdns_client: Arc<MdnsClient>,
+  mdns_server: Arc<DeviceMDNSResponder>,
   mcast_tx: mpsc::Sender<crate::protocol::mcast::MulticastMessage>,
   tx_latency_ns: u32,
   channels_sub_tx: watch::Sender<Option<Arc<ChannelsSubscriber>>>,
-  tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>>,
+  flows_tx: Arc<Mutex<Option<FlowsTransmitter>>>,
+  tx_multicasts: Arc<Mutex<Option<TransmitMulticasts>>>,
   rx_peaks_supplier: Arc<RwLock<Box<dyn Fn() -> Vec<u8> + Send + Sync>>>,
   tx_peaks_supplier: Arc<RwLock<Box<dyn Fn() -> Vec<u8> + Send + Sync>>>,
   shutdown_todo: Pin<Box<dyn Future<Output = ()> + Send>>,
@@ -98,7 +102,6 @@ impl DeviceServer {
     let mut tasks = vec![];
 
     let (channels_sub_tx, channels_sub_rx) = watch::channel(None);
-    let tx_flows_info: Arc<RwLock<Vec<Option<TXFlowInfo>>>> = Default::default();
     //let tx_peaks = Arc::new((0..self_info.tx_channels.len()).map(|_|AtomicSample::new(0)).collect_vec());
     //let rx_peaks = Arc::new((0..self_info.rx_channels.len()).map(|_|AtomicSample::new(0)).collect_vec());
 
@@ -108,6 +111,8 @@ impl DeviceServer {
       Arc::new(RwLock::new(Box::new(|| -> Vec<u8> { vec![] })));
     let txps = tx_peaks_supplier.clone();
     let rxps = rx_peaks_supplier.clone();
+    let flows_tx: Arc<Mutex<Option<FlowsTransmitter>>> = Default::default();
+    let tx_multicasts: Arc<Mutex<Option<TransmitMulticasts>>> = Default::default();
     tasks.append(&mut vec![
       tokio::spawn(arc_server::run_server(
         self_info.clone(),
@@ -115,7 +120,8 @@ impl DeviceServer {
         mdns_handle.clone(),
         mcast_tx.clone(),
         channels_sub_rx.clone(),
-        tx_flows_info.clone(),
+        flows_tx.clone(),
+        tx_multicasts.clone(),
         shdn_recv1,
       )),
       tokio::spawn(cmc_server::run_server(self_info.clone(), shdn_recv2)),
@@ -131,6 +137,7 @@ impl DeviceServer {
 
     info!("all common tasks spawned");
 
+    let mdns_server = mdns_handle.clone();
     let shutdown_todo = async move {
       shutdown_send.send(()).unwrap();
       for task in tasks {
@@ -147,10 +154,12 @@ impl DeviceServer {
       clock_receiver,
       shared_media_clock,
       mdns_client,
+      mdns_server,
       mcast_tx,
       tx_latency_ns: settings.tx_latency_ns,
       channels_sub_tx,
-      tx_flows_info,
+      flows_tx,
+      tx_multicasts,
       rx_peaks_supplier,
       tx_peaks_supplier,
       //tasks,
@@ -248,6 +257,7 @@ impl DeviceServer {
       for task in tasks {
         task.await.unwrap();
       }
+      info!("receiver stopped");
     }
     .boxed();
     self.rx_shutdown_todo = Some(shutdown_todo);
@@ -287,11 +297,18 @@ impl DeviceServer {
       current_timestamp.clone(),
       on_transfer,
     );
+    *self.flows_tx.lock().await = Some(flows_tx_handle);
+    *self.tx_multicasts.lock().await = Some(TransmitMulticasts::new(
+      self.state_storage.clone(),
+      self.self_info.clone(),
+      self.flows_tx.clone(),
+      self.mdns_server.clone(),
+      self.mdns_client.clone(),
+    ));
     let (shutdown_send, shutdown_recv) = broadcast_queue::channel(16);
     let flows_control_task = tokio::spawn(flows_control_server::run_server(
       self.self_info.clone(),
-      flows_tx_handle,
-      self.tx_flows_info.clone(),
+      self.flows_tx.clone(),
       shutdown_recv,
     ));
     //let peaks_work = Arc::new(AtomicBool::new(true));
@@ -316,13 +333,21 @@ impl DeviceServer {
         }
       }
     }).unwrap(); */
+    let flows_tx = self.flows_tx.clone();
+    let tx_multicasts = self.tx_multicasts.clone();
     self.tx_shutdown_todo = Some(
       async move {
         //peaks_work1.store(false, Ordering::Relaxed);
         shutdown_send.send(()).unwrap();
         flows_control_task.await.unwrap();
+        if let Some(txm) = tx_multicasts.lock().await.as_ref() {
+          txm.shutdown().await;
+        }
+        *flows_tx.lock().await = None;
+        *tx_multicasts.lock().await = None;
         flows_tx_thread.join().unwrap();
         //peaks_thread.join().unwrap();
+        info!("transmitter stopped");
       }
       .boxed(),
     );

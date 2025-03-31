@@ -4,12 +4,12 @@ use searchfire::{
   net::{IpVersion, TargetInterface},
 };
 use std::{
-  net::IpAddr,
+  net::{IpAddr, Ipv4Addr},
   sync::{Arc, RwLock},
 };
 
 use super::flows_tx::{FPP_MAX_ADVERTISED, FPP_MIN, MAX_CHANNELS_IN_FLOW};
-use crate::{device_info::DeviceInfo, utils::LogAndForget};
+use crate::{device_info::DeviceInfo, mdns_client::MdnsClient, utils::LogAndForget};
 
 pub struct DeviceMDNSResponder {
   handle: RwLock<Option<BroadcasterHandle>>,
@@ -22,6 +22,15 @@ pub fn kv<T: std::fmt::Display>(key: &str, value: T) -> String {
 
 pub fn service_type(st: &str) -> Name {
   Name::from_labels([st, "_udp", "local"].iter().map(|&s| s.as_bytes())).unwrap()
+}
+pub fn in_addr_type() -> Name {
+  Name::from_labels(["in-addr", "local"].iter().map(|&s| s.as_bytes())).unwrap()
+}
+fn multicast_ip_to_name(addr: Ipv4Addr) -> Name {
+  let octets = addr.octets();
+  Name::from_labels([
+    &octets[3].to_string(), &octets[2].to_string(), &octets[1].to_string(), &octets[0].to_string()
+  ].iter().map(|&s| s.as_bytes())).unwrap()
 }
 
 impl DeviceMDNSResponder {
@@ -130,6 +139,34 @@ impl DeviceMDNSResponder {
       remove(&friendly_name);
     }
   }
+
+  pub fn reserve_multicast_ip(&self, addr: Ipv4Addr) {
+    let self_info = &*self.self_info;
+    let b = ServiceBuilder::new(in_addr_type(), multicast_ip_to_name(addr), 0)
+      .unwrap()
+      .add_ip_address(IpAddr::V4(self_info.ip_address));
+    let handle = self.handle.read().unwrap();
+    match handle.as_ref() {
+      Some(handle) => {
+        handle.add_service(b.build().unwrap()).log_and_forget();
+      },
+      None => {
+        log::error!("BUG: trying to reserve multicast IP using BroadcasterHandle after it was shut down");
+      }
+    }
+  }
+  pub fn remove_multicast_ip(&self, addr: Ipv4Addr) {
+    let handle = self.handle.read().unwrap();
+    match handle.as_ref() {
+      Some(handle) => {
+        handle.remove_named_service(in_addr_type(), multicast_ip_to_name(addr)).log_and_forget();
+      },
+      None => {
+        log::error!("BUG: trying to remove multicast IP reservation using BroadcasterHandle after it was shut down");
+      }
+    }
+  }
+
 
   pub fn shutdown_and_join(&self) {
     self
