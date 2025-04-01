@@ -16,6 +16,7 @@ use tokio::{select, sync::mpsc};
 use crate::util::os::set_current_thread_realtime;
 use crate::ring_buffer::{ProxyToSamplesBuffer, RBOutput};
 use super::samples_utils::*;
+use super::tx_multicasts::MEDIA_PORT;
 use crate::util::thread::run_future_in_new_thread;
 use crate::{common::*, device_info::DeviceInfo};
 use crate::{
@@ -533,7 +534,7 @@ impl FlowsTransmitter {
   }
   pub fn random_multicast_destination(&self) -> (Ipv4Addr, u16) {
     loop {
-      let port = 4321;
+      let port = MEDIA_PORT;
       let ip = Ipv4Addr::new(239, 255, thread_rng().gen(), thread_rng().gen());
       if !self.destination_exists(ip, port) {
         return (ip, port);

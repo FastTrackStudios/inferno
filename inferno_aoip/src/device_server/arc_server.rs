@@ -1,4 +1,5 @@
 use super::channels_subscriber::ChannelsSubscriber;
+use super::saved_settings::SavedChannelsSettings;
 use super::tx_multicasts::TransmitMulticasts;
 use crate::mdns_client::MdnsClient;
 use crate::{byte_utils::*, net_utils};
@@ -14,7 +15,7 @@ use crate::protocol::mcast::make_channel_change_notification;
 use crate::protocol::req_resp::{self, CODE_OK};
 use crate::protocol::req_resp::HEADER_LENGTH;
 use crate::protocol::proto_arc::*;
-use crate::state_storage::{SavedChannelsSettings, StateStorage};
+use crate::state_storage::StateStorage;
 use crate::utils::LogAndForget;
 use binary_serde::recursive_array::RecursiveArray as _;
 use binary_serde::BinarySerde;
@@ -41,9 +42,6 @@ pub async fn run_server(
 ) {
   let mut subscriber = None;
   let mut saved_channels = SavedChannelsSettings::load(state_storage, self_info.clone());
-  for (index, _) in self_info.tx_channels.iter().enumerate() {
-    mdns_server.add_tx_channel(index);
-  }
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.arc_port, shutdown).await;
   let mut conn = req_resp::Connection::new(server);
   let mut recv_buff = net_utils::ReceiveBuffer::new();
@@ -404,6 +402,9 @@ pub async fn run_server(
           } else {
             conn.respond_with_code(0xFFFF /* TODO */, &[]).await;
           }
+        }
+        delete_multicast_tx_flow::OPCODE => {
+          // TODO
         }
 
         0x2320 => {

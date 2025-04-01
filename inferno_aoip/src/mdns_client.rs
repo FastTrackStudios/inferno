@@ -34,7 +34,7 @@ pub struct PointerToMulticast {
 #[derive(Debug, Clone)]
 pub struct AdvertisedBundle {
   pub tx_channels_per_flow: usize,
-  pub tx_channel_id: u16,
+  pub tx_bundle_id: u16,
   pub bits_per_sample: u32,
   pub fpp: u16,
   pub min_rx_latency_ns: usize,
@@ -90,6 +90,7 @@ impl MdnsClient {
           if let Some(rdata) = record.data() {
             if let Some(addr) = rdata.as_a() {
               return Ok(*addr != self.listen_ip); // skip own IP
+              // FIXME: dangerous if we have multiple instances on a single IP address !!!
             }
           }
         }
@@ -239,7 +240,7 @@ impl MdnsClient {
     let media_addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
     return Ok(AdvertisedBundle {
       tx_channels_per_flow: parse_int("nchan")?,
-      tx_channel_id: parse_int("id")? as u16,
+      tx_bundle_id: parse_int("id")? as u16,
       bits_per_sample: parse_int("enc").or_else(|_| parse_int("en"))? as u32,
       fpp: parse_int("fpp")? as u16,
       min_rx_latency_ns: parse_int("latency_ns")?,

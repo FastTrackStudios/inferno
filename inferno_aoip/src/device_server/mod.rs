@@ -1,4 +1,4 @@
-use crate::mdns_client::MdnsClient;
+use crate::mdns_client::{MdnsClient, PointerToMulticast};
 use crate::media_clock::{
   async_clock_receiver_to_realtime, make_shared_media_clock, start_clock_receiver, ClockReceiver,
 };
@@ -14,6 +14,7 @@ use mdns_server::DeviceMDNSResponder;
 use tokio::task::JoinHandle;
 use tx_multicasts::TransmitMulticasts;
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
@@ -38,6 +39,7 @@ pub(crate) mod flows_rx;
 mod peaks;
 pub(crate) mod samples_collector;
 pub(crate) mod samples_utils;
+pub(crate) mod saved_settings;
 pub(crate) mod settings;
 pub(crate) mod tx_multicasts;
 
@@ -71,6 +73,7 @@ pub struct DeviceServer {
   channels_sub_tx: watch::Sender<Option<Arc<ChannelsSubscriber>>>,
   flows_tx: Arc<Mutex<Option<FlowsTransmitter>>>,
   tx_multicasts: Arc<Mutex<Option<TransmitMulticasts>>>,
+  tx_multicasts_by_channel: Arc<RwLock<BTreeMap<usize, PointerToMulticast>>>,
   rx_peaks_supplier: Arc<RwLock<Box<dyn Fn() -> Vec<u8> + Send + Sync>>>,
   tx_peaks_supplier: Arc<RwLock<Box<dyn Fn() -> Vec<u8> + Send + Sync>>>,
   shutdown_todo: Pin<Box<dyn Future<Output = ()> + Send>>,
@@ -87,7 +90,8 @@ impl DeviceServer {
     let (shutdown_send, shdn_recv1) = broadcast_queue::channel(16);
     let shdn_recv2 = shutdown_send.subscribe();
     let shdn_recv3 = shutdown_send.subscribe();
-    let mdns_handle = Arc::new(mdns_server::DeviceMDNSResponder::start(self_info.clone()));
+    let tx_multicasts_by_channel: Arc<RwLock<BTreeMap<usize, PointerToMulticast>>> = Default::default();
+    let mdns_handle = Arc::new(mdns_server::DeviceMDNSResponder::start(self_info.clone(), tx_multicasts_by_channel.clone()));
 
     let mdns_client = Arc::new(crate::mdns_client::MdnsClient::new(self_info.ip_address));
     let (mcast_tx, mcast_rx) = mpsc::channel(100);
@@ -160,6 +164,7 @@ impl DeviceServer {
       channels_sub_tx,
       flows_tx,
       tx_multicasts,
+      tx_multicasts_by_channel,
       rx_peaks_supplier,
       tx_peaks_supplier,
       //tasks,
@@ -240,7 +245,7 @@ impl DeviceServer {
       self.mdns_client.clone(),
       self.mcast_tx.clone(),
       channels_buffering,
-      self.tx_latency_ns,
+      self.tx_latency_ns /* FIXME should be RX latency */,
       self.state_storage.clone(),
       srx2,
       self.ref_instant,
@@ -298,13 +303,20 @@ impl DeviceServer {
       on_transfer,
     );
     *self.flows_tx.lock().await = Some(flows_tx_handle);
-    *self.tx_multicasts.lock().await = Some(TransmitMulticasts::new(
+    let txm = TransmitMulticasts::new(
+      self.tx_multicasts_by_channel.clone(),
       self.state_storage.clone(),
       self.self_info.clone(),
       self.flows_tx.clone(),
       self.mdns_server.clone(),
       self.mdns_client.clone(),
-    ));
+    );
+    txm.load_state().await;
+    *self.tx_multicasts.lock().await = Some(txm);
+    for (index, _) in self.self_info.tx_channels.iter().enumerate() {
+      self.mdns_server.remove_tx_channel(index);
+      self.mdns_server.add_tx_channel(index);
+    }
     let (shutdown_send, shutdown_recv) = broadcast_queue::channel(16);
     let flows_control_task = tokio::spawn(flows_control_server::run_server(
       self.self_info.clone(),
@@ -340,11 +352,10 @@ impl DeviceServer {
         //peaks_work1.store(false, Ordering::Relaxed);
         shutdown_send.send(()).unwrap();
         flows_control_task.await.unwrap();
-        if let Some(txm) = tx_multicasts.lock().await.as_ref() {
+        if let Some(txm) = tx_multicasts.lock().await.take() {
           txm.shutdown().await;
         }
         *flows_tx.lock().await = None;
-        *tx_multicasts.lock().await = None;
         flows_tx_thread.join().unwrap();
         //peaks_thread.join().unwrap();
         info!("transmitter stopped");

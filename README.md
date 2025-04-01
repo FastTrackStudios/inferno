@@ -148,6 +148,13 @@ Please use editor respecting `.editorconfig` (for example, VSCode needs an exten
 
 # Changelog
 
+## 0.4.0
+* refactor - preparation to introduction of controller functionality
+* multicast transmitter
+
+## 0.3.3
+* fix starting without default route in routing table (Searchfire)
+
 ## 0.3.2
 * changeable RX & TX channel names
 * RX & TX latency configurable via env var or ALSA plugin parameter
@@ -181,7 +188,6 @@ initial release
 likely in order they'll be implementated
 
 * ability to change settings in Dante Controller
-* transmit multicast flows
 
 At this point, Inferno will roughly become alternative to Dante Virtual Soundcard.
 
@@ -225,3 +231,4 @@ To my knowledge, there are no other unofficial implementations of audio transmis
 * [pipewire-aes67](https://gitlab.freedesktop.org/pipewire/pipewire/-/wikis/AES67)
 * [aes67-recorder](https://github.com/voc/aes67-recorder) ([tutorial for usage with Dante](https://behringer.world/viewtopic.php?t=197))
 * AES67 can be also received by any software that supports raw audio in RTP packets, e.g. FFmpeg or GStreamer.
+  * ... Dante multicasts are equally simple... just cut off 9 bytes at the front of every UDP packet ;)
