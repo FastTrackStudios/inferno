@@ -8,11 +8,12 @@ use std::{
 };
 
 use super::flows_tx::{FPP_MAX_ADVERTISED, FPP_MIN, MAX_CHANNELS_IN_FLOW};
-use crate::{device_info::DeviceInfo, mdns_client::{MdnsClient, PointerToMulticast}, utils::LogAndForget};
+use crate::{device_info::DeviceInfo, mdns_client::{self_origin_from_self_info, MdnsClient, PointerToMulticast}, utils::LogAndForget};
 
 pub struct DeviceMDNSResponder {
   handle: RwLock<Option<BroadcasterHandle>>,
   self_info: Arc<DeviceInfo>,
+  self_origin: Vec<u8>,
   multicasts_by_channel: Arc<RwLock<BTreeMap<usize, PointerToMulticast>>>,
 }
 
@@ -37,7 +38,7 @@ impl DeviceMDNSResponder {
   pub fn start(self_info: Arc<DeviceInfo>, multicasts_by_channel: Arc<RwLock<BTreeMap<usize, PointerToMulticast>>>) -> Self {
     let hostname = Name::from_labels([self_info.friendly_hostname.as_bytes()]).unwrap();
     let bb = BroadcasterBuilder::new()
-      //.loopback()
+      .loopback()
       .interface_v4(TargetInterface::Specific(self_info.ip_address))
       .add_service(
         ServiceBuilder::new(service_type("_netaudio-arc"), hostname.clone(), self_info.arc_port)
@@ -73,7 +74,12 @@ impl DeviceMDNSResponder {
 
     let handle = bb.build(IpVersion::V4).unwrap().run_in_background();
 
-    Self { handle: RwLock::new(Some(handle)), self_info, multicasts_by_channel }
+    Self {
+      handle: RwLock::new(Some(handle)),
+      self_origin: self_origin_from_self_info(&self_info),
+      self_info,
+      multicasts_by_channel
+    }
   }
 
   pub fn add_tx_channel(&self, index: usize) {
@@ -194,7 +200,8 @@ impl DeviceMDNSResponder {
     let self_info = &*self.self_info;
     let b = ServiceBuilder::new(in_addr_type(), multicast_ip_to_name(addr), 0)
       .unwrap()
-      .add_ip_address(IpAddr::V4(self_info.ip_address));
+      .add_ip_address(IpAddr::V4(self_info.ip_address))
+      .add_additional_txt(Name::from_labels(["_inferno-response-origin", "local"]).unwrap(), self.self_origin.clone());
     let handle = self.handle.read().unwrap();
     match handle.as_ref() {
       Some(handle) => {

@@ -1,10 +1,6 @@
-use crate::common::*;
+use crate::{common::*, device_info::DeviceInfo};
 use std::{
-  collections::BTreeMap,
-  error::Error,
-  io,
-  net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-  str::{self}, time::Duration,
+  collections::BTreeMap, error::Error, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::{self}, sync::Arc, time::Duration
 };
 
 use searchfire::{
@@ -56,13 +52,23 @@ pub struct AdvertisedChannel {
   pub multicast: Option<PointerToMulticast>,
 }
 
+pub fn self_origin_from_self_info(self_info: &DeviceInfo) -> Vec<u8> {
+  (hex::encode(self_info.factory_device_id) + "," + &self_info.process_id.to_string()).into()
+}
+
 pub struct MdnsClient {
   listen_ip: Ipv4Addr,
+  self_origin: Vec<u8>,
+  self_info: Arc<DeviceInfo>,
 }
 
 impl MdnsClient {
-  pub fn new(listen_ip: Ipv4Addr) -> Self {
-    Self { listen_ip }
+  pub fn new(self_info: Arc<DeviceInfo>) -> Self {
+    Self {
+      listen_ip: self_info.ip_address,
+      self_origin: self_origin_from_self_info(&self_info),
+      self_info
+    }
   }
   async fn do_single_query(
     &self,
@@ -72,26 +78,50 @@ impl MdnsClient {
   ) -> Result<DnsResponse, Box<dyn Error>> {
     DiscoveryBuilder::new()
       .interface_v4(TargetInterface::Specific(self.listen_ip))
+      .loopback()
       .build(IpVersion::V4)
       .map_err(|e| Box::new(e))?
-      .single_query(types, fqdn, timeout)
+      .single_query(types, fqdn, timeout, |origin_addr, response| {
+        let is_local = match origin_addr.ip() {
+          std::net::IpAddr::V4(addr) => {
+            addr.is_loopback() || addr==self.listen_ip
+          },
+          _ => false
+        };
+        if is_local {
+          let response_origin_fqdn = Name::from_labels(["_inferno-response-origin", "local"]).unwrap();
+          for rr in response.additionals() {
+            if rr.name() == &response_origin_fqdn {
+              if let Some(data) = rr.data() {
+                if let Some(txt) = data.as_txt() {
+                  if let Some(data) = txt.txt_data().get(0) {
+                    if data.eq_ignore_ascii_case(&self.self_origin) {
+                      debug!("got answer from self, ignoring this response");
+                      return false;
+                    } else {
+                      debug!("got local answer from other instance, considering");
+                      return true;
+                    }
+                  }
+                }
+              }
+            }
+          }
+          true
+        } else {
+          true
+        }
+      })
       .await
       .map_err(|e| Box::new(e).into())
   }
   async fn a_record_exists_single_check(&self, fqdn_parts: &[&str], timeout: Duration) -> Result<bool, Box<dyn Error>> {
-    debug!("checking if A record exists: {fqdn_parts:?}");
     let fqdn = Name::from_labels(fqdn_parts.iter().map(|&s| s.as_bytes())).map_err(|e| Box::new(e))?;
     match self.do_single_query(&[RecordType::A], &fqdn, timeout).await {
       Ok(response) => {
         for record in response.answers() {
-          if record.name().to_lowercase() != fqdn.to_lowercase() {
-            continue;
-          }
-          if let Some(rdata) = record.data() {
-            if let Some(addr) = rdata.as_a() {
-              return Ok(*addr != self.listen_ip); // skip own IP
-              // FIXME: dangerous if we have multiple instances on a single IP address !!!
-            }
+          if record.name().to_lowercase() == fqdn.to_lowercase() {
+            return Ok(true);
           }
         }
         Ok(true)
@@ -100,6 +130,7 @@ impl MdnsClient {
     }
   }
   pub async fn a_record_exists(&self, fqdn_parts: &[&str]) -> Result<bool, Box<dyn Error>> {
+    debug!("checking if A record exists: {fqdn_parts:?}");
     for _ in 0..3 {
       let r = self.a_record_exists_single_check(fqdn_parts, Duration::from_millis(400)).await?;
       if r { return Ok(r) };

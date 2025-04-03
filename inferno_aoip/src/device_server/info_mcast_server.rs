@@ -140,8 +140,15 @@ impl<'s> Multicaster<'s> {
     write_str_to_buffer(&mut content, 8, 8, &self.self_info.board_name);
     write_str_to_buffer(&mut content, 0x2c, 16, &self.self_info.manufacturer);
     write_str_to_buffer(&mut content, 0xac, 16, &self.self_info.model_name);
-    // version number:
-    content[0x12c..0x130].copy_from_slice(&self.product_version_bytes);
+    // product version:
+    //content[0x12c..0x130].copy_from_slice(&self.product_version_bytes);
+
+    // firmware version:
+    content[0x1c..0x20].copy_from_slice(&self.product_version_bytes);
+
+    // 0x18..0x1b - software version
+    // 0x24..0x26 - software patch version, u32
+    // 0x28..0x2b - firmware patch version, u32
 
     self.send(self.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0xc0, 0, 0, 0, 0], &content).await;
   }

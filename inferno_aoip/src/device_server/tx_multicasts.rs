@@ -20,9 +20,11 @@ use super::mdns_server::DeviceMDNSResponder;
 
 pub const MEDIA_PORT: u16 = 4321;
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize)]
 pub struct SavedMulticastTXFlow {
   flow_id: usize,
+  dst_addr: Ipv4Addr,
+  dst_port: u16,
   local_channel_ids: Vec<usize>,
 }
 
@@ -73,6 +75,9 @@ impl TransmitMulticasts {
       if saved.flow_id == 0 {
         continue;
       }
+      if saved.dst_port != MEDIA_PORT {
+        error!("non-default port specified in saved state: {}, changing to {}", saved.dst_port, MEDIA_PORT);
+      }
       let mut flow_index = saved.flow_id-1;
       {
         let bundles = self.bundles.lock().await;
@@ -86,16 +91,19 @@ impl TransmitMulticasts {
           }
         }
       }
-      self.add_flow(flow_index, saved.local_channel_ids.iter().map(|&id| {
+      self.add_flow_internal(flow_index, saved.local_channel_ids.iter().map(|&id| {
         if id==0 {
           None
         } else {
           Some(id-1)
         }
-      }).collect_vec()).await;
+      }).collect_vec(), saved.dst_addr).await;
     }
   }
   pub async fn add_flow(&self, flow_index: usize, channel_indices: Vec<Option<usize>>) {
+    self.add_flow_internal(flow_index, channel_indices, Ipv4Addr::UNSPECIFIED).await
+  }
+  async fn add_flow_internal(&self, flow_index: usize, channel_indices: Vec<Option<usize>>, preferred_address: Ipv4Addr) {
     info!("adding flow index {flow_index} with local channel indices {channel_indices:?}");
     let bytes_per_sample = (self.self_info.bits_per_sample/8).try_into().unwrap();
     let dst_addr_arc: Arc<AtomicU32> = Arc::new(0.into());
@@ -105,7 +113,11 @@ impl TransmitMulticasts {
       assert!(bundles[flow_index].is_none());
       let mut flows_tx = self.flows_tx.lock().await;
       let (dst_addr, dst_port) = if let Some(tx) = flows_tx.as_mut() {
-        let (dst_addr, dst_port) = tx.random_multicast_destination();
+        let (dst_addr, dst_port) = if preferred_address.is_unspecified() {
+          tx.random_multicast_destination()
+        } else {
+          (preferred_address, MEDIA_PORT)
+        };
         let flow_info = TXFlowInfo {
           rx_hostname: None,
           rx_flow_name: None,
@@ -186,7 +198,7 @@ impl TransmitMulticasts {
                 (dst_addr, dst_port) = flows_tx.random_multicast_destination();
 
                 // note: the following add_flow must happen after remove_multicast_flow, WITHOUT flows_tx being unlocked in the meantime!
-                // otherwise race condition may happen
+                // otherwise race condition may happen - our flow_index may get occupied by other, unrelated flow
 
                 // TODO: DRY
                 let flow_info = TXFlowInfo {
@@ -249,7 +261,7 @@ impl TransmitMulticasts {
         }
       }
     } else if !ignore_nonexisting {
-      error!("BUG: removing not established multicast TX flow index {flow_index}");
+      error!("BUG: removing nonexisting multicast TX flow index {flow_index}");
     }
   }
   pub async fn shutdown(&self) {
@@ -269,6 +281,8 @@ impl TransmitMulticasts {
       bundle_opt.as_ref().map(|bundle| {
         SavedMulticastTXFlow {
           flow_id: flow_index+1,
+          dst_addr: Ipv4Addr::from_bits(bundle.dst_addr.load(std::sync::atomic::Ordering::SeqCst)),
+          dst_port: MEDIA_PORT,
           local_channel_ids: bundle.local_channel_indices.iter().map(|index_opt| {
             index_opt.map(|i|i+1).unwrap_or(0)
           }).collect_vec()

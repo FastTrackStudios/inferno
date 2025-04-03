@@ -93,7 +93,7 @@ impl DeviceServer {
     let tx_multicasts_by_channel: Arc<RwLock<BTreeMap<usize, PointerToMulticast>>> = Default::default();
     let mdns_handle = Arc::new(mdns_server::DeviceMDNSResponder::start(self_info.clone(), tx_multicasts_by_channel.clone()));
 
-    let mdns_client = Arc::new(crate::mdns_client::MdnsClient::new(self_info.ip_address));
+    let mdns_client = Arc::new(crate::mdns_client::MdnsClient::new(self_info.clone()));
     let (mcast_tx, mcast_rx) = mpsc::channel(100);
 
     info!("clock path: {:?}", settings.clock_path);
