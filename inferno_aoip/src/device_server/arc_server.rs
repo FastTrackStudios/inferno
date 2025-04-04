@@ -351,7 +351,8 @@ pub async fn run_server(
                 continue;
               }
               if descr.flow_id==0 || descr.flow_id as usize > MAX_TX_FLOWS as _ {
-                error!("wanted to create multicast flow with invalid flow id: {}", descr.flow_id);
+                // MAYBE TODO move this check to tx_multicasts
+                error!("wanted to create multicast tx flow with invalid flow id: {}", descr.flow_id);
                 continue;
               }
               let flow_index = (descr.flow_id as usize)-1;
@@ -360,11 +361,12 @@ pub async fn run_server(
                 let flows_tx = if let Some(flows_tx) = flows_tx_opt.as_mut() {
                   flows_tx
                 } else {
-                  error!("trying to create multicast flow but we have no flows transmitter active");
+                  error!("trying to create multicast tx flow but we have no flows transmitter active");
                   continue;
                 };
                 if flows_tx.get_flows_info()[flow_index].is_some() {
-                  error!("flow id busy: {}", descr.flow_id);
+                  // TODO move this check to tx_multicasts or flows_tx
+                  error!("tx flow id busy: {}", descr.flow_id);
                   continue;
                 }
               }
@@ -387,7 +389,7 @@ pub async fn run_server(
               }
               flow_ids.push(flow_index + 1);
             } else {
-              error!("failed to parse multicast flow descriptor");
+              error!("failed to parse multicast tx flow descriptor");
               continue;
             }
           }
@@ -404,7 +406,31 @@ pub async fn run_server(
           }
         }
         delete_multicast_tx_flow::OPCODE => {
-          // TODO
+          let content = request.content();
+          let count = make_u16(content[0], content[1]).try_into().unwrap();
+          let flow_indices = content[4..].chunks_exact(2)
+            .map(|chunk|u16::from_be_bytes(chunk.try_into().unwrap()))
+            .take(count)
+            .filter_map(|id| if id > 0 { Some((id as usize) - 1) } else { None });
+
+          let mut deleted_any = false;
+
+          for flow_index in flow_indices {
+            if let Some(txm) = tx_multicasts.lock().await.as_ref() {
+              txm.remove_flow(flow_index).await.map(|()| {
+                deleted_any = true;
+                info!("deleted multicast tx flow id {}", flow_index+1);
+              }).log_and_forget();
+            } else {
+              error!("tx_multicasts None but got delete multicast request");
+              continue;
+            }
+          }
+          if deleted_any {
+            conn.respond(&[]).await;
+          } else {
+            conn.respond_with_code(0xFFFF /* TODO */, &[]).await;
+          }
         }
 
         0x2320 => {
@@ -579,7 +605,7 @@ pub async fn run_server(
         }
 
         0x3014 => {
-          // netaudio subscription remove
+          // netaudio subscription remove (used by network-audio-controller)
           // received unknown opcode1 0x3014, content 000100000002
           // whole packet: "27ff00104a1c30140000000100000002"
           if let Some(channels_recv) = &subscriber {

@@ -191,6 +191,11 @@ impl TransmitMulticasts {
                     mdns_server.add_tx_channel(*index);
                   }
                 }
+                
+                // FIXME: we can't do self.save_state().await because we have no self here!
+                // so multicast address won't be saved, sorry
+                // TODO: refactor to make it possible
+
                 break;
               } else {
                 warn!("multicast address conflict detected: {dst_addr:?}, retrying");
@@ -225,43 +230,51 @@ impl TransmitMulticasts {
       });
     }
   }
-  pub async fn remove_flow(&self, flow_index: usize) {
-    self.remove_flow_internal(flow_index, false).await;  
+  pub async fn remove_flow(&self, flow_index: usize) -> Result<(), std::io::Error> {
+    self.remove_flow_internal(flow_index, false).await?;  
     self.save_state().await;
+    Ok(())
   }
-  async fn remove_flow_internal(&self, flow_index: usize, ignore_nonexisting: bool) {
+  async fn remove_flow_internal(&self, flow_index: usize, ignore_nonexisting: bool) -> Result<(), std::io::Error> {
     let mut bundles = self.bundles.lock().await;
     if let Some(bundle) = bundles[flow_index].take() {
-      let addr_int = bundle.dst_addr.load(std::sync::atomic::Ordering::SeqCst);
-      if addr_int != 0 {
-        self.mdns_server.remove_multicast_bundle(flow_index+1);
-        self.mdns_server.remove_multicast_ip(Ipv4Addr::from_bits(addr_int));
-      }
-      {
-        let mut flows_tx_opt = self.flows_tx.lock().await;
-        if let Some(flows_tx) = flows_tx_opt.as_mut() {
-          if self.should_work.load(std::sync::atomic::Ordering::SeqCst) {
-            flows_tx.remove_multicast_flow(flow_index.try_into().unwrap()).await.log_and_forget();
-          } // else flows_tx will be destroyed soon
+      let mut flows_tx_opt = self.flows_tx.lock().await;
+      if let Some(flows_tx) = flows_tx_opt.as_mut() {
+        if !self.should_work.load(std::sync::atomic::Ordering::SeqCst) {
+          // flows_tx will be destroyed soon or was already changed
+          return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
         }
-      }
-      {
-        let mut mcasts = self.multicasts_by_channel.write().unwrap();
-        for (_channel_in_bundle, chi_opt) in bundle.local_channel_indices.iter().enumerate() {
-          if let Some(chi) = chi_opt {
-            mcasts.remove(chi);
+        let addr_int = bundle.dst_addr.load(std::sync::atomic::Ordering::SeqCst);
+        if addr_int != 0 {
+          self.mdns_server.remove_multicast_bundle(flow_index+1);
+          self.mdns_server.remove_multicast_ip(Ipv4Addr::from_bits(addr_int));
+        }
+        let result = flows_tx.remove_multicast_flow(flow_index.try_into().unwrap()).await;
+        {
+          let mut mcasts = self.multicasts_by_channel.write().unwrap();
+          for (_channel_in_bundle, chi_opt) in bundle.local_channel_indices.iter().enumerate() {
+            if let Some(chi) = chi_opt {
+              mcasts.remove(chi);
+            }
           }
         }
-      }
-      // refresh channels so that multicast will no longer be advertised
-      for index_opt in bundle.local_channel_indices {
-        if let Some(index) = index_opt {
-          self.mdns_server.remove_tx_channel(index);
-          self.mdns_server.add_tx_channel(index);
+        // refresh channels so that multicast will no longer be advertised
+        for index_opt in bundle.local_channel_indices {
+          if let Some(index) = index_opt {
+            self.mdns_server.remove_tx_channel(index);
+            self.mdns_server.add_tx_channel(index);
+          }
         }
+        result
+      } else {
+        // flows_tx has been destroyed
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
       }
     } else if !ignore_nonexisting {
-      error!("BUG: removing nonexisting multicast TX flow index {flow_index}");
+      error!("BUG: trying to remove nonexisting multicast TX flow index {flow_index}");
+      Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    } else {
+      Ok(())
     }
   }
   pub async fn shutdown(&self) {
@@ -270,7 +283,7 @@ impl TransmitMulticasts {
       self.should_work.store(false, std::sync::atomic::Ordering::SeqCst);
     }
     for i in 0..MAX_FLOWS {
-      self.remove_flow_internal(i.try_into().unwrap(), true).await;
+      self.remove_flow_internal(i.try_into().unwrap(), true).await.log_and_forget();
     }
   }
   pub async fn save_state(&self) {

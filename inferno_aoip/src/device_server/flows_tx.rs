@@ -497,7 +497,7 @@ impl FlowsTransmitter {
             expired: flow.expired.clone(),
           })
           .await
-          .unwrap();
+          .map_err(|_|std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
 
         let cookie = flow.cookie;
         self.flows.insert(flow_index, flow);

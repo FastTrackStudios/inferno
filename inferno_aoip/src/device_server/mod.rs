@@ -350,11 +350,11 @@ impl DeviceServer {
     self.tx_shutdown_todo = Some(
       async move {
         //peaks_work1.store(false, Ordering::Relaxed);
-        shutdown_send.send(()).unwrap();
-        flows_control_task.await.unwrap();
         if let Some(txm) = tx_multicasts.lock().await.take() {
           txm.shutdown().await;
         }
+        shutdown_send.send(()).unwrap();
+        flows_control_task.await.unwrap();
         *flows_tx.lock().await = None;
         flows_tx_thread.join().unwrap();
         //peaks_thread.join().unwrap();

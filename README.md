@@ -32,7 +32,7 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 | Stream audio from/to DVS, Dante Via & old Dante hardware | ✅ Yes | ✅ Yes | 🚫 No  |
 | Stream audio from/to AES67           | 🚫 No  | 🚫 No  | ✅ Yes |
 | Minimum latency | as low as your kernel gets | 4ms | ... | 
-| Sends & receives multicasts | ⏳ Receives | ✅ Yes | ✅ Yes |
+| Sends & receives multicasts | ✅ Yes | ✅ Yes | ✅ Yes |
 | OS integration | Entirely user-space | Kernel driver & user-space services | Kernel driver & user-space helper |
 | Lightweight recording app | ✅ Yes (Inferno2pipe) | 🚫 No | ☑️ FFmpeg with RTP input does the trick |
 | Disk space & RAM usage | 🌱 Low (~12MB RAM) | 🔥 High | 🌱 Low |
