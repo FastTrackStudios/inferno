@@ -18,13 +18,13 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 
 |   | **Inferno** | [DVS](https://www.getdante.com/products/software-essentials/dante-virtual-soundcard) | [AES67 Linux daemon](https://github.com/bondagit/aes67-linux-daemon) |
 |---|---|---|---|
-| Maturity | 💣 Alpha | ✅ Production-ready | ✅ Probably stable |
+| Maturity | ⏳ Alpha but used in production | ✅ Production-ready | ✅ Probably stable |
 | Platforms | Linux  | Mac, Windows  | Linux |
 | Supported protocols | Dante | Dante | AES67 |
 | Directly supported audio backends | ALSA | CoreAudio, ASIO, WDM | ALSA |
 | Works with DAWs | 💣 experimental | ✅ Yes | ✅ Yes |
 | Route audio using Dante Controller patchbay | ✅ Yes! | ✅ Yes | 🚫 AES67->Dante only |
-| Configurable using Dante Controller | ⏳ Mostly not yet | ✅ Yes | 🚫 No |
+| Configurable using Dante Controller | ⏳ A bit (channel names, TX multicasts) | ✅ Yes | 🚫 No |
 | Compatible with Dante Domain Manager | 🚫 No | ✅ Yes | 🚫 No (but AES67 integration possible) |
 | Supported clock protocols | [PTPv1](https://github.com/teodly/statime/tree/inferno-dev) ☑️, PTPv2 ☑️ | PTPv1 ✅ | PTPv2 ✅ |
 | Clock leader | PTPv2 ☑️ via [Statime](https://github.com/pendulum-project/statime) | 🚫 No (but possible in Dante Via) | ☑️ via external daemon |
@@ -50,6 +50,8 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 
 ## Quirks, read it before using:
 * Dante protocol is undocumented. Everything was reverse-engineered or based on other reverse-engineering projects. Some things in implementation were guessed. So while it works with my setup, it may not work with yours.
+* Collisions with NTP clock synchronization have been noticed. The built-in clock filter is insufficient. [Fixing it properly is complicated.](https://github.com/pendulum-project/statime/issues/389#issuecomment-2214559362) If your network interface supports hardware timestamping, you may be able to workaround it using `/dev/ptp0` as [`CLOCK_PATH`](#configuration) and a [PTP daemon that does not use global system clock](https://gitlab.freedesktop.org/pipewire/pipewire/-/wikis/AES67#setting-up-ptp-time-sync), but you need to enable PTPv2 (AES67) in one of Dante devices then because ptp4l is not compatible with PTPv1.
+  * to fix this in Statime, [PHC-only mode](https://github.com/pendulum-project/statime/issues/517) needs to be implemented for hardware timestamps, and [CLOCK_MONOTONIC-based virtual clock with arbitrary timescale](https://github.com/pendulum-project/statime/issues/389) for software timestamps
 * Inferno2pipe is clocked by incoming media flows. When nothing is connected, "time will stop" (i.e. recording will pause) until something is connected again - silence won't be generated unless at least one channel is connected.
 
 
@@ -62,6 +64,7 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
    * `cd statime && cargo build`
    * adjust network interface in `inferno-ptpv1.toml`
    * `sudo target/debug/statime -c inferno-ptpv1.toml`
+   * Disable global system time synchronization while Inferno is in use! (`systemctl stop chronyd.service`)
 4. Clone this repo with `--recursive` option (some dependencies are in submodules)
 5. `cd` to the desired program/library directory
    * simple command line audio recorder: [`Inferno2pipe`](inferno2pipe/README.md)
@@ -135,6 +138,7 @@ Configuration can be set via:
 * `TX_CHANNELS` - number of transmit channels, defaults to 2, will be overwritten by the application if it supports changing channels count.
 * `RX_LATENCY_NS` - receive latency in nanoseconds, i.e. how much time to wait for media packets, relatively to PTP media clock. Equivalent to latency setting in Dante Controller. Defaults to 10ms. May be removed in future versions when it becomes settable from DC and so stored in a configuration file.
 * `TX_LATENCY_NS` - transmit latency in nanoseconds, i.e. receive latency that this device will demand from devices receiving from us. Equivalent to latency setting in Dante Virtual Soundcard. Defaults to 10ms.
+* `CLOCK_PATH` - path to either [usrvclock](https://gitlab.com/lumifaza/usrvclock) socket, or PTP device. If the latter, make sure [you are allowed](https://gitlab.freedesktop.org/pipewire/pipewire/-/blob/78642cc53bd84c2ad529f2175cc50a658d1e52c0/src/daemon/90-pipewire-aes67-ptp.rules) to read it. Also, write permissions are required if you want to see actual frequency offset in DC. (the clock is never adjusted from within Inferno, but the syscall to read the frequency requires write access)
 
 # Contributing
 Issue reports and pull requests are welcome.
