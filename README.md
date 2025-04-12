@@ -6,6 +6,8 @@ Highly experimental for now. I don't recommend using it for serious purposes.
 
 However, chances that it'll break already working Dante network are low.
 
+If you know what you're doing and have basic Linux command line experience, it is perfectly usable for non-critical tasks, e.g. listening to music, playing multitracks through mixing console for mixing practice, recording rehearsals.
+
 Big thanks to [Project Pendulum](https://github.com/pendulum-project) (by [Trifecta Tech Foundation](https://trifectatech.org/)) for creating and maintaining [Statime](https://github.com/pendulum-project/statime) and collaboration on features needed for audiovisual networks functionality! Audio transmission would be much more difficult to implement without it.
 
 Respect to the engineers at Audinate for well-designed protocol and robust hardware devices, but the suits that decided to keep the protocol secret, ignore FOSS community and paywall a device driver should go to... [Inferno](https://en.wikipedia.org/wiki/Inferno_(Dante))!
@@ -140,6 +142,7 @@ Configuration can be set via:
 * `TX_LATENCY_NS` - transmit latency in nanoseconds, i.e. receive latency that this device will demand from devices receiving from us. Equivalent to latency setting in Dante Virtual Soundcard. Defaults to 10ms.
 * `CLOCK_PATH` - path to either [usrvclock](https://gitlab.com/lumifaza/usrvclock) socket, or PTP device. If the latter, make sure [you are allowed](https://gitlab.freedesktop.org/pipewire/pipewire/-/blob/78642cc53bd84c2ad529f2175cc50a658d1e52c0/src/daemon/90-pipewire-aes67-ptp.rules) to read it. Also, write permissions are required if you want to see actual frequency offset in DC. (the clock is never adjusted from within Inferno, but the syscall to read the frequency requires write access)
 
+
 # Contributing
 Issue reports and pull requests are welcome.
 
@@ -148,6 +151,21 @@ By submitting any contribution, you agree that it will be distributed according 
 If you want to fork this project into something working in cloud (or public Internet in general), you may consider removing the GPL license and retaining AGPL.
 
 Please use editor respecting `.editorconfig` (for example, VSCode needs an extension: [EditorConfig for VS Code](https://open-vsx.org/extension/EditorConfig/EditorConfig)) or configure it approprietly manually.
+
+## Dependencies
+This project is dependent on Statime ([upstream](https://github.com/pendulum-project/statime), [our fork](https://github.com/teodly/statime/tree/inferno-dev)), so if you want to help, look at its TODO list, too! The most important are:
+* [PTPv1 support](https://github.com/pendulum-project/statime/pull/602) - slave already working but not upstreamed yet
+* [PHC-only mode](https://github.com/pendulum-project/statime/issues/517) (for hardware timestamping)
+* [Independent clock for arbitrary timescale](https://github.com/pendulum-project/statime/issues/389) (for software timestamping) - already sort of working, but unstable due to Linux using CLOCK_REALTIME for software timestamps, and not upstreamed completely
+
+## Non-code contributions
+If you want to contribute but can't code or don't know where to start because this project is complex, you can:
+* report issues
+* request new features
+* discuss new features, often a decision needs to be made and having multiple voices helps
+* test with more Linux software! `grep -r 'not tested yet'` for a list
+* try to achieve sub-millisecond latency with PREEMPT_RT kernel
+* test with more [Dante devices](#dante-devices), preferably very new or very old ones without firmware updates
 
 
 # Changelog
@@ -195,13 +213,21 @@ likely in order they'll be implementated
 
 At this point, Inferno will roughly become alternative to Dante Virtual Soundcard.
 
+* realtime thread priorities configurable
+* report late packets in DC
+* operation without PTP daemon with lower clock precision - useful for OSes other than Linux
 * read configuration from text files
-* ability to work as a clock source (PTP leader)
+* ability to work as a clock source (PTPv1 leader) - Statime
+  * it is already possible if you use PTPv2 - in theory you should be able to make Inferno-only AoIP network - not tested yet
 * automated integration test that will launch several instances, stream audio data between them and check for its correctness
 * bit-perfect transmitter (currently 32-bit integers are always used internally and conversion to 24-bit or 16-bit adds dither)
-* API: number of channels changeable without device server restart (useful for Dante Via-like operation where transmitters & receivers can be added and removed dynamically)
+* command line helper / TUI / GUI
+* installer script, with cross compilation support
+* more refactoring of network packets serializers & deserializers to make more code reusable in upcoming controller app (because DC is bloated closed source and bad UX)
 * AES67
 * primary & secondary network support, for dual-NIC computers
+* API: number of channels changeable without device server restart (useful for Dante Via-like operation where transmitters & receivers can be added and removed dynamically)
+  * not really necessary to replicate functionality of Via, as now multiple Inferno instances on a single IP address are supported
 * `grep -r TODO inferno_aoip/src`
 
 
