@@ -123,6 +123,45 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
 * `searchfire` - fork of [Searchlight](https://github.com/WilliamVenner/searchlight) mDNS crate, modified for compatibility with Dante's mDNS
 
 
+# Clocking options
+
+## Software timestamping
+It is the default option, compatible with all NICs (network cards) and Dante devices. It is less stable than the others, unless you disable system time synchronization. It requires [our fork or the Statime daemon](https://github.com/teodly/statime/tree/inferno-dev).
+
+Change the network interface in `inferno-ptpv1.toml` configuration file and run the daemon using:
+
+```
+sudo target/debug/statime -c inferno-ptpv1.toml
+```
+
+You also need to disable time synchronization, usually one of the following commands will suffice:
+```
+sudo systemctl stop chronyd.service
+sudo systemctl stop systemd-timesyncd.service
+sudo systemctl stop ntpd.service
+```
+
+You can change the protocol from PTPv1 to PTPv2 in Statime configuration - this allows master operation (currently implemented only for PTPv2) so Inferno can be used even when no physical Dante device is in the network. But then at least one Dante device with AES67 enabled must be present in the network to make Inferno and Dante devices interoperate.
+
+## Hardware timestamping
+If your network card supports hardware timestamping (check with `ethtool -T`), you can use its clock directly without relying on system clock. It is more accurate than software timestamping, meaning that you can potentially use lower audio latencies. Set the Inferno's configuration option `CLOCK_PATH` to PTP clock device path, usually `/dev/ptp0`.
+
+If you require PTPv1 (Dante without AES67), you need to use our fork of Statime because there is no other open source PTPv1 daemon. In `inferno-ptpv1.toml`, set the `hardware-clock` option to `auto` and start the daemon:
+```
+sudo target/debug/statime -c inferno-ptpv1.toml
+```
+
+If you can live with PTPv2, you can use different PTP implementation, e.g. [linuxptp](https://www.linuxptp.org/):
+```
+sudo ptp4l -i enp0s31f6 -p /dev/ptp0 -l6 -E -H -s -m -4 --priority1 255 --priority2 255 --domainNumber 0 --freq_est_interval=7 --delay_filter_length=240 --dscp_event 46
+```
+
+or [unpatched (upstream) Statime](https://github.com/pendulum-project/statime).
+
+
+The best performance is achieved by Statime (no matter whether patched or not) and PTPv2. PTPv1 is under investigation...
+
+
 # Configuration
 Configuration can be set via:
 
