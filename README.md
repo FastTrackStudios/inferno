@@ -159,7 +159,7 @@ sudo ptp4l -i enp0s31f6 -p /dev/ptp0 -l6 -E -H -s -m -4 --priority1 255 --priori
 or [unpatched (upstream) Statime](https://github.com/pendulum-project/statime).
 
 
-The best performance is achieved by Statime (no matter whether patched or not) and PTPv2. PTPv1 is under investigation...
+Audio packets latency jitter is similar when using Statime and ptp4l, however clock histogram in DC shows that ptp4l is doing more abrupt changes in the long run and Statime is unstable for a few seconds during startup.
 
 
 # Configuration
