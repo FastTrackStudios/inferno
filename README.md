@@ -169,7 +169,7 @@ Configuration can be set via:
 * ALSA plugin configuration - it is recommended to specify them in your `asoundrc` because too long ALSA device string may be truncated (happens with PipeWire, not sure about other apps)
 
 ## Settings
-* `BIND_IP` - which local IP to bind to. Specifying it may be necessary if you have multiple network interfaces
+* `BIND_IP` - which local IP to bind to. Specifying it may be necessary if you have multiple network interfaces. Alternatively, network interface name may be specified, in that case the first address belonging to the interface will be used.
 * `DEVICE_ID` - 16 hexadecimal digits (8 bytes) used as a device ID. Dante devices usually use MAC address padded with zeros. Inferno uses `0000<IP address>0000` by default. Device ID is the storage key when saving state.
 * `NAME` - name of advertised device. If unspecified, name based on app name and IP address will be generated. May be removed in future versions when it becomes settable from DC and so stored in a configuration file.
 * `SAMPLE_RATE` - sample rate this device will operate on

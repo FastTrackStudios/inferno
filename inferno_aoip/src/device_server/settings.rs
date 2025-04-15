@@ -22,9 +22,15 @@ fn create_self_info(
 ) -> DeviceInfo {
   // TODO: change expect to non-fatal errors, with current approach an app using ALSA plugin may be crashed for a bening reason
 
+  let interfaces = netdev::get_interfaces();
   let my_ipv4 = my_ip
     .or_else(|| {
-      settings.get("BIND_IP").map(|ipstr| ipstr.parse().expect("invalid IP in setting BIND_IP"))
+      settings.get("BIND_IP").map(|ipstr| ipstr.parse().unwrap_or_else(|_| {
+        interfaces.iter().find(|iface| &iface.name == ipstr)
+          .expect("invalid setting BIND_IP, must contain IP address or network interface name")
+          .ipv4.get(0).expect("interface specified in BIND_IP has no IPv4 addresses")
+          .addr()
+      }))
     })
     .unwrap_or_else(|| match local_ip_address::local_ip().expect("unknown local IP, cannot continue") {
       IpAddr::V4(a) => a,
@@ -67,7 +73,7 @@ fn create_self_info(
   let mut gateway = Ipv4Addr::new(0, 0, 0, 0);
   let mut mac_address = MacAddr::zero();
   let mut speed = 0;
-  for iface in netdev::get_interfaces() {
+  for iface in interfaces {
     let mut our_iface = false;
     for network in iface.ipv4 {
       if network.addr() == my_ipv4 {
