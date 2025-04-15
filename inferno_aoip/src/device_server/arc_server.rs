@@ -208,12 +208,12 @@ pub async fn run_server(
         rename_tx_channels::OPCODE => {
           let content = request.content();
           let mut renamed_ids = deserialize_items::<rename_tx_channels::SingleChannelRenameRequest>(content).filter_map(|rename| {
-            let channel_id = rename.channel_id.saturating_sub(HEADER_LENGTH as _);
-            let name_offset = rename.new_name_offset.saturating_sub(HEADER_LENGTH as _);
+            let channel_id = rename.channel_id;
+            let name_offset = rename.new_name_offset.saturating_sub(HEADER_LENGTH as _) as usize;
             if channel_id==0 || name_offset==0 {
               return None;
             }
-            match read_0term_str_from_buffer(content, name_offset as usize - HEADER_LENGTH) {
+            match read_0term_str_from_buffer(content, name_offset) {
               Ok(new_name) => {
                 let index = (channel_id - 1) as usize;
                 if index < self_info.tx_channels.len() {
@@ -247,12 +247,12 @@ pub async fn run_server(
           let content = request.content();
           let mut renamed_any = false;
           let renamed_indices = deserialize_items::<rename_rx_channels::SingleChannelRenameRequest>(content).filter_map(|rename| {
-            let channel_id = rename.channel_id.saturating_sub(HEADER_LENGTH as _);
-            let name_offset = rename.new_name_offset.saturating_sub(HEADER_LENGTH as _);
+            let channel_id = rename.channel_id;
+            let name_offset = rename.new_name_offset.saturating_sub(HEADER_LENGTH as _) as usize;
             if channel_id==0 || name_offset==0 {
               return None;
             }
-            match read_0term_str_from_buffer(content, name_offset as usize - HEADER_LENGTH) {
+            match read_0term_str_from_buffer(content, name_offset) {
               Ok(new_name) => {
                 let index = (channel_id - 1) as usize;
                 if index < self_info.rx_channels.len() {
