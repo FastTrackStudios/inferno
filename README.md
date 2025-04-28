@@ -97,6 +97,7 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
 * Audinate AVIO-DAI2
 * Ben & Fellows 523019 4x4 balanced analog I/O module (based on Dante UltimoX4)
 * Klark Teknik DN32-DANTE (Behringer X32) (based on Dante Brooklyn II)
+* Behringer Aoip-Dante (Behringer Wing-Rack) (based on Dante Brooklyn III)
 * Soundcraft Vi2000 & Vi3000
 * Allen&Heath SQ-5 & SQ-6
 * ESI planet 22c
@@ -169,6 +170,7 @@ Configuration can be set via:
 * ALSA plugin configuration - it is recommended to specify them in your `asoundrc` because too long ALSA device string may be truncated (happens with PipeWire, not sure about other apps)
 
 ## Settings
+All settings have default values. In a simple setup you should be able to start without specifying any parameters.
 * `BIND_IP` - which local IP to bind to. Specifying it may be necessary if you have multiple network interfaces. Alternatively, network interface name may be specified, in that case the first address belonging to the interface will be used.
 * `DEVICE_ID` - 16 hexadecimal digits (8 bytes) used as a device ID. Dante devices usually use MAC address padded with zeros. Inferno uses `0000<IP address>0000` by default. Device ID is the storage key when saving state.
 * `NAME` - name of advertised device. If unspecified, name based on app name and IP address will be generated. May be removed in future versions when it becomes settable from DC and so stored in a configuration file.
