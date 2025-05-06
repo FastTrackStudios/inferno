@@ -102,6 +102,7 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
 * Ben & Fellows 523019 4x4 balanced analog I/O module (based on Dante UltimoX4)
 * Klark Teknik DN32-DANTE (Behringer X32) (based on Dante Brooklyn II)
 * Behringer Aoip-Dante (Behringer Wing-Rack) (based on Dante Brooklyn III)
+* Orban Optimod 5750 (based on Dante Broadway)
 * Soundcraft Vi2000 & Vi3000
 * Allen&Heath SQ-5 & SQ-6
 * ESI planet 22c
