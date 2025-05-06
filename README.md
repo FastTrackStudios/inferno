@@ -71,8 +71,12 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 5. `cd` to the desired program/library directory
    * simple command line audio recorder: [`Inferno2pipe`](inferno2pipe/README.md)
    * virtual soundcard for ALSA: [`alsa_pcm_inferno`](alsa_pcm_inferno/README.md) - also works with PipeWire, should work with JACK (not tested yet)
-6. `cargo build`
-7. Follow the instructions in README of the specific program/library
+6. If using `alsa_pcm_inferno`, install alsa dev libraries.
+   * `sudo apt install libasound2-dev` on Debian/Ubuntu/Mint
+   * `pacman -S alsa-lib` on Arch
+   * `dnf install alsa-lib-devel` on Fedora/Centos
+7. `cargo build`
+8. Follow the instructions in README of the specific program/library
 
 
 # Legal and moral stuff
