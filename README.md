@@ -117,6 +117,7 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
 ## Dante devices
 * Audinate AVIO AES3
 * Audinate AVIO-DAI2
+* Audinate AVIO USBC (AVIO-DIOUSBC)
 * Ben & Fellows 523019 4x4 balanced analog I/O module (based on Dante UltimoX4)
 * Klark Teknik DN32-DANTE (Behringer X32) (based on Dante Brooklyn II)
 * Behringer Aoip-Dante (Behringer Wing-Rack) (based on Dante Brooklyn III)
@@ -124,7 +125,7 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
 * Soundcraft Vi2000 & Vi3000
 * Allen&Heath SQ-5 & SQ-6
 * ESI planet 22c
-* Dante Via @ OS X
+* Dante Via @ OS X and Windows 11
 * Dante Virtual Soundcard @ Windows 10
 
 ## Control software
@@ -136,9 +137,12 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
   * Arch
   * Ubuntu
   * Fedora
-* aarch64 (ARM 64-bit) Linux @ Raspberry Pi 5
-  * Raspberry Pi OS
-  * Armbian Bookworm
+* aarch64 (ARM 64-bit) Linux
+  * Raspberry Pi 5 - Raspberry Pi OS & Armbian Bookworm
+  * Raspberry Pi 4 (no hardware PTP) - Raspberry Pi OS Lite (64bit)
+  * Raspberry Pi Zero 2 W (with USB Ethernet) - Raspberry Pi OS Lite (64bit) - CAUTION build times are long
+
+
 
 # Anatomy of the repository
 * `inferno_aoip` - main library crate for emulating a Dante audio over IP device. In the future controller functionality will also be implemented. **Start here if you want to develop your app based on Inferno**.
