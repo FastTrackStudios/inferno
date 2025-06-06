@@ -60,23 +60,41 @@ Respect to the engineers at Audinate for well-designed protocol and robust hardw
 # Quick start
 1. [Install Rust](https://rustup.rs/)
 2. If using a firewall, open UDP ports: 4455, 8700, 4400, 8800 (or others if [`INFERNO_ALT_PORT`](#environment-variables) is specified), 5353. Also, allow incoming UDP traffic from possible transmitters (port numbers are allocated by the OS so can't be known beforehand)
-3. <s>If wanting to use anything other than Inferno2pipe,</s> clock synchronization daemon is needed. Inferno is compatible with modified [Statime](https://github.com/pendulum-project/statime):
+3. Ensure that seccomp, SELinux or other kernel-level security mechanisms are not blocking clock-related syscalls. For example, if you want to use `alsa_pcm_inferno` together with PipeWire, and PipeWire service is managed by systemd, copy [`os_integration/systemd_allow_clock.conf`](os_integration/systemd_allow_clock.conf) to `$HOME/.config/systemd/user/pipewire.service.d/override.conf` (or, if already exists, append it)
+4. <s>If wanting to use anything other than Inferno2pipe,</s> clock synchronization daemon is needed. Inferno is compatible with modified [Statime](https://github.com/pendulum-project/statime):
    * currently, Statime is always needed, even for just capturing audio, but it is not by design and will be fixed
    * `git clone --recurse-submodules -b inferno-dev https://github.com/teodly/statime`
    * `cd statime && cargo build`
    * adjust network interface in `inferno-ptpv1.toml`
    * `sudo target/debug/statime -c inferno-ptpv1.toml`
    * Disable global system time synchronization while Inferno is in use! (`systemctl stop chronyd.service`)
-4. Clone this repo with `--recursive` option (some dependencies are in submodules)
-5. `cd` to the desired program/library directory
+5. Clone this repo with `--recursive` option (some dependencies are in submodules)
+6. `cd` to the desired program/library directory
    * simple command line audio recorder: [`Inferno2pipe`](inferno2pipe/README.md)
    * virtual soundcard for ALSA: [`alsa_pcm_inferno`](alsa_pcm_inferno/README.md) - also works with PipeWire, should work with JACK (not tested yet)
-6. If using `alsa_pcm_inferno`, install alsa dev libraries.
+7. If using `alsa_pcm_inferno`, install alsa dev libraries.
    * `sudo apt install libasound2-dev` on Debian/Ubuntu/Mint
    * `pacman -S alsa-lib` on Arch
    * `dnf install alsa-lib-devel` on Fedora/Centos
-7. `cargo build`
-8. Follow the instructions in README of the specific program/library
+8. `cargo build`
+9. Follow the instructions in README of the specific program/library
+
+## Cross compiling
+If you want to use Inferno on Raspberry Pi or other single-board computer, it is usually faster to compile on your desktop/server/laptop (*host*) and copy resulting binaries to the *target*. Also, you will not run out of SD card space or RAM.
+
+Fortunately, there is **actually zero-setup** tool for this: [`cross`](https://crates.io/crates/cross). Install it and instead of executing `cargo build`, do:
+
+```
+cross build --release --target=aarch64-unknown-linux-gnu
+```
+
+and you'll find compiled binaries in `target/aarch64-unknown-linux-gnu/release`.
+
+Currently the only dependency needed on the target system is the ALSA library, if using `alsa_pcm_inferno`. Everything else is stored in the binary.
+
+Installing dependencies on your host system is not needed - `cross` does it inside its container according to instructions from `Cargo.toml`.
+
+If you need to compile for a different architecture, add it to `Cargo.toml` (copy-paste the `workspace.metadata.cross.target` section) before running `cross`. It is needed only for `alsa_pcm_inferno`. Statime does not have any shared library dependencies.
 
 
 # Legal and moral stuff
