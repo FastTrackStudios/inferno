@@ -19,7 +19,7 @@ pub type FineClockDiff = i64;
 //#[derive(Clone)]
 pub struct MediaClock {
   overlay: Option<ClockOverlay>,
-  safe: SafeClock,
+  safe: Option<SafeClock>,
 }
 
 #[inline(always)]
@@ -28,8 +28,13 @@ fn timestamp_to_clock_value(ts: clock_steering::Timestamp) -> FineClock {
 }
 
 impl MediaClock {
-  pub fn new() -> Self {
-    Self { overlay: None, safe: SafeClock::new(0.01, 3_000_000_000) }
+  pub fn new(use_safe_clock: bool) -> Self {
+    let safe = if use_safe_clock {
+      Some(SafeClock::new(0.01, 3_000_000_000))
+    } else {
+      None
+    };
+    Self { overlay: None, safe }
   }
   pub fn is_ready(&self) -> bool {
     self.overlay.is_some()
@@ -52,11 +57,15 @@ impl MediaClock {
   #[inline(always)]
   pub fn now_ns(&mut self) -> Option<FineClock> {
     self.overlay.map(|overlay| {
-      let safe_ts = self.safe.now(&overlay);
-      if safe_ts.estimated {
-        warn!("using estimated clock because of possible jump!");
+      if let Some(safe) = &mut self.safe {
+        let safe_ts = safe.now(&overlay);
+        if safe_ts.estimated {
+          warn!("using estimated clock because of possible jump!");
+        }
+        safe_ts.nanos as FineClock
+      } else {
+        overlay.now_ns() as FineClock
       }
-      safe_ts.nanos as FineClock
     })
   }
   #[inline(always)]
@@ -91,9 +100,9 @@ pub fn start_clock_receiver(path: Option<PathBuf>) -> ClockReceiver {
   )
 }
 
-pub async fn make_shared_media_clock(receiver: &ClockReceiver) -> Arc<RwLock<MediaClock>> {
+pub async fn make_shared_media_clock(receiver: &ClockReceiver, use_safe_clock: bool) -> Arc<RwLock<MediaClock>> {
   let mut rx = receiver.subscribe();
-  let media_clock = MediaClock::new();
+  let media_clock = MediaClock::new(use_safe_clock);
   /* loop {
     match rx.recv().await {
       Ok(overlay) => {

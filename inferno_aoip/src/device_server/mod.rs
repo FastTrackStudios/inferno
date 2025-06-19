@@ -100,7 +100,7 @@ impl DeviceServer {
     let clock_receiver = start_clock_receiver(settings.clock_path.clone());
 
     info!("waiting for clock");
-    let shared_media_clock = make_shared_media_clock(&clock_receiver).await;
+    let shared_media_clock = make_shared_media_clock(&clock_receiver, settings.use_safe_clock).await;
     info!("clock ready");
 
     let mut tasks = vec![];

@@ -467,7 +467,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       silence_writers: Vec::with_capacity(max_channels),
       poll,
       sample_rate,
-      clock: MediaClock::new(),
+      clock: MediaClock::new(false /* TODO */),
       clock_recv,
       ref_instant,
       on_transfer,

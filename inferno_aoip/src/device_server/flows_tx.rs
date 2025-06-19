@@ -367,7 +367,7 @@ impl FlowsTransmitter {
       commands_receiver: rx,
       sample_rate,
       flows: (0..MAX_FLOWS).map(|_| None).collect_vec(),
-      clock: MediaClock::new(),
+      clock: MediaClock::new(false /* TODO */),
       channels_sources: channels_outputs,
       send_latency_samples: latency.try_into().unwrap(), // TODO in ALSA plugin should be 0, the more the worse because aplay wants to fill the whole buffer
       timestamp_shift: (0 as ClockDiff).wrapping_sub_unsigned(latency.try_into().unwrap()),

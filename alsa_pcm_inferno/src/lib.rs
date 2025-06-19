@@ -630,7 +630,7 @@ unsafe extern "C" fn plugin_define(
         use_flows_clock,
         stream_info: None,
         buffers_valid: Arc::new(RwLock::new(false)),
-        media_clock: MediaClock::new(),
+        media_clock: MediaClock::new(false /* TODO */),
         clock_receiver: None,
         start_time: None,
         start_time_tx: None,

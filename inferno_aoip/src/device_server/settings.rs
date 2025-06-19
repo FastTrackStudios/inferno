@@ -150,6 +150,7 @@ pub struct Settings {
   pub self_info: DeviceInfo,
   pub tx_latency_ns: u32,
   pub clock_path: Option<PathBuf>,
+  pub use_safe_clock: bool,
 }
 
 impl Settings {
@@ -172,6 +173,11 @@ impl Settings {
     });
     let self_info = create_self_info(app_name, short_app_name, my_ip, &config);
 
+    let use_safe_clock = config
+      .get("USE_SAFE_CLOCK")
+      .map(|s| s.parse().expect("invalid USE_SAFE_CLOCK, must be boolean"))
+      .unwrap_or(false);
+
     let mut result = Self {
       self_info,
       tx_latency_ns: config
@@ -179,6 +185,7 @@ impl Settings {
         .map(|p| p.parse().expect("invalid TX_LATENCY_NS, must be integer"))
         .unwrap_or(10_000_000),
       clock_path: config.get("CLOCK_PATH").map(|p| p.try_into().unwrap()),
+      use_safe_clock,
     };
 
     // the following should be harmless, as the application still has the chance to overwrite it

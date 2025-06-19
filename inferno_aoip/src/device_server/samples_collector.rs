@@ -358,7 +358,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static> SamplesCollector<P> {
     (
       Self { commands_sender: tx },
       async move { internal.run().await }.boxed(),
-      RealTimeSamplesReceiver { channels: receivers, clock: MediaClock::new(), clock_recv },
+      RealTimeSamplesReceiver { channels: receivers, clock: MediaClock::new(false /* TODO */), clock_recv },
     )
   }
 
