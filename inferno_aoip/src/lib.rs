@@ -33,18 +33,23 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Inferno - unofficial implemention of the Dante protocol (Audio over IP)
+//! Inferno - unofficial implementation of Dante protocol (Audio over IP)
 //!
-//! Currently this library emulates a Dante device with receive channels,
-//! which can be connected to transmitters using Dante Controller (official,
-//! proprietary closed source) or
-//! `[network-audio-controller](https://github.com/chris-ritsen/network-audio-controller)`
-//! (unofficial, open source)
+//! This library provides both RX (receive) and TX (transmit) capabilities for
+//! audio streaming over IP networks using the Dante protocol.
 //!
-//! For example, this will show peak levels of incoming audio samples:
-//! ```
-//! use inferno_aoip::{Sample, DeviceInfo, DeviceServer, SelfInfoBuilder};
+//! ## Features
+//! * receiving audio from and sending audio to Dante devices and virtual devices
+//! * works with most features of Dante Controller and [network-audio-controller](https://github.com/chris-ritsen/network-audio-controller) (`netaudio` command line tool)
 //!
+//! ## External dependencies (not handled by `Cargo.toml`)
+//! * PTP clock synchronization daemon - see [README](https://gitlab.com/lumifaza/inferno/-/blob/dev/README.md?ref_type=heads#clocking-options) for details.
+//!
+//! ## Example: Multi-channel peak level meter
+//! 
+//! ```rust
+//! use inferno_aoip::device_server::{DeviceServer, Settings, Sample};
+//! 
 //! fn audio_callback(samples_count: usize, channels: &Vec<Vec<Sample>>) {
 //!   let line = channels.iter().map(|ch| {
 //!     let peak = (ch.iter().take(samples_count).map(|samp|
@@ -59,17 +64,31 @@
 //!   }).collect::<String>();
 //!   println!("{line}");
 //! }
-//!
+//! 
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() {
-//!   // TODO: update line below with Settings
-//!   let self_info = DeviceInfo::new_self("My Inferno device", "MyInferno", None).make_rx_channels(16);
-//!   // TODO: update line below with proper start_* function
-//!   let server = DeviceServer::start(self_info, Box::new(audio_callback)).await;
-//!   let _ = tokio::signal::ctrl_c().await;
+//!   let logenv = env_logger::Env::default().default_filter_or("debug");
+//!   env_logger::init_from_env(logenv);
+//!   
+//!   let mut settings = Settings::new(
+//!     "My Peak Meter", 
+//!     "PkMeter", 
+//!     None,
+//!     &Default::default()
+//!   );
+//!   settings.make_rx_channels(8);
+//! 
+//!   let mut server = DeviceServer::start(settings).await;
+//!   server.receive_with_callback(Box::new(audio_callback)).await;
+//! 
+//!   tokio::signal::ctrl_c().await.ok();
 //!   server.shutdown().await;
 //! }
 //! ```
+//!
+//! ## Legal
+//! * This project makes no claim to be either authorized or approved by Audinate.
+//! * Dual licensed under GPLv3-or-later and AGPLv3-or-later
 //!
 
 mod common;

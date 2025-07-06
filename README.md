@@ -2,6 +2,8 @@
 
 [GitLab](https://gitlab.com/lumifaza/inferno) | [GitHub](https://github.com/teodly/inferno) | [Principal author's website](https://info.lumifaza.org/)
 
+This project is named after [a place](https://en.wikipedia.org/wiki/Inferno_(Dante)) destined for those who decided to keep the protocol undocumented.
+
 Highly experimental for now. I don't recommend using it for serious purposes.
 
 However, chances that it'll break already working Dante network are low.
@@ -10,11 +12,10 @@ If you know what you're doing and have basic Linux command line experience, it i
 
 Big thanks to [Project Pendulum](https://github.com/pendulum-project) (by [Trifecta Tech Foundation](https://trifectatech.org/)) for creating and maintaining [Statime](https://github.com/pendulum-project/statime) and collaboration on features needed for audiovisual networks functionality! Audio transmission would be much more difficult to implement without it.
 
-Respect to the engineers at Audinate for well-designed protocol and robust hardware devices, but the suits that decided to keep the protocol secret, ignore FOSS community and paywall a device driver should go to... [Inferno](https://en.wikipedia.org/wiki/Inferno_(Dante))!
 
 # Features
 * receiving audio from and sending audio to Dante devices and virtual devices
-* connections can be made using Dante Controller or [network-audio-controller](https://github.com/chris-ritsen/network-audio-controller) (`netaudio` command line tool)
+* works with most features of Dante Controller and [network-audio-controller](https://github.com/chris-ritsen/network-audio-controller) (`netaudio` command line tool)
 
 ## Comparison with other AoIP virtual soundcards
 
