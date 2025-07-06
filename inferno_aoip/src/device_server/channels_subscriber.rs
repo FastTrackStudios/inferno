@@ -855,7 +855,8 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
           continue;
         }
         let first = (*channels.first_entry().unwrap().get()).clone();
-        for chunk in &channels.iter().chunks(first.tx_channels_per_flow) {
+        let num_channels_in_flow = first.tx_channels_per_flow.min(self.self_info.rx_channels.len()).min(8 /*TODO make it configurable*/);
+        for chunk in &channels.iter().chunks(num_channels_in_flow) {
           let chunk = chunk.collect_vec();
           let flow_index = match flows_locked.iter().position(|o| o.is_none()) {
             Some(i) => i,
@@ -875,7 +876,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
           let flow = Flow::new(
             flow_id,
             source,
-            first.tx_channels_per_flow.min(self.self_info.rx_channels.len()).min(8), /*TODO make it configurable*/
+            num_channels_in_flow,
             tx_channels,
             ((first.min_rx_latency_ns as u64).max(self.min_latency_ns as u64)
               * (self.self_info.sample_rate as u64)
@@ -1018,6 +1019,10 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
           let subscription = self.channels[chi].as_mut().unwrap();
           let remote = upd.remote.clone();
           let flow = flows[remote.local_flow_index].as_mut().unwrap();
+          if remote.channel_in_flow >= flow.tx_channels.len() {
+            error!("BUG: channel in flow index {} but this flow has {} channels", remote.channel_in_flow, flow.tx_channels.len());
+            continue;
+          }
           flow.tx_channels[remote.channel_in_flow] = Some(remote.tx_channel_id);
           flow.channels_refcount[remote.channel_in_flow] += 1;
           if flow.channels_rb_outputs[remote.channel_in_flow].is_none() {
