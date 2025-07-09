@@ -134,6 +134,7 @@ impl<T, P: ProxyToBuffer<Atomic<T>>> RingBufferShared<T, P> {
     readable_pos_dest: Option<PositionReportDestination>,
   ) -> Arc<Self> {
     let items_size = (storage.len() + stride - 1) / stride;
+    assert!(items_size.is_power_of_two());
     Arc::new(RingBufferShared {
       _t: Default::default(),
       buffer: storage,
@@ -147,8 +148,8 @@ impl<T, P: ProxyToBuffer<Atomic<T>>> RingBufferShared<T, P> {
   }
   #[inline(always)]
   fn item_to_buffer_index(&self, i: usize) -> usize {
-    // TODO change to more optimized log2 implementation when we're sure that buffer length will always be power of 2
-    (i % self.items_size) * self.stride
+    // a % b == a & (b-1) if b is power of 2
+    (i & (self.items_size-1)) * self.stride
   }
   #[inline(always)]
   fn commit_readable_pos(&self) {
@@ -169,8 +170,9 @@ fn for_in_ring(length: usize, start: usize, end: usize, mut cb: impl FnMut(usize
   if start == end {
     return;
   }
-  let w_start = start % length;
-  let w_end = end % length;
+  let length_mask = length-1;
+  let w_start = start & length_mask;
+  let w_end = end & length_mask;
   if w_start < w_end {
     for i in w_start..w_end {
       cb(i);
