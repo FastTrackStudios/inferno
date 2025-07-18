@@ -32,7 +32,6 @@ pub const FPP_MAX_ADVERTISED: u16 = 32;
 pub const MAX_FLOWS: u32 = 32;
 pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
 pub const KEEPALIVE_TIMEOUT_SECONDS: Clock = 4;
-pub const MAX_LAG_SAMPLES: usize = 2048;
 pub const DISCONTINUITY_THRESHOLD_SAMPLES: usize = 192000;
 const BUFFERED_SAMPLES_PER_CHANNEL: usize = 65536;
 pub const SELECT_THRESHOLD: Duration = Duration::from_millis(100);
@@ -96,6 +95,7 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
   channels_sources: Vec<RBOutput<Sample, P>>,
   send_latency_samples: usize,
   clock_offset_samples: ClockDiff,
+  max_lag_samples: usize,
   timestamp_shift: ClockDiff,
   current_timestamp: Arc<AtomicUsize>,
   on_transfer: Option<Box<dyn Fn() + Send>>,
@@ -112,7 +112,8 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     let mut tmp_samples = [0 as Sample; FPP_MAX as usize];
     let mut pbuff = [0u8; MTU];
     let sample_rate = self.sample_rate;
-    let max_lag_samples = MAX_LAG_SAMPLES;
+    let max_lag_samples = self.max_lag_samples;
+    let mut iterations = 0;
     if let Some(now) = self.now() {
       let mut max_missing_samples = 0;
       for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
@@ -146,11 +147,11 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
               let r =
                 self.channels_sources[ch_index].read_at(start_ts as usize, &mut tmp_samples[0..flow.fpp]);
               if r.useful_start_index != 0 || r.useful_end_index != flow.fpp {
-                error!(
+                /* error!(
                   "didn't have enough samples, transmitting silence. {} {}",
                   r.useful_start_index,
                   flow.fpp - r.useful_end_index
-                );
+                ); */
 
                 tmp_samples[0..r.useful_start_index].fill(0);
                 tmp_samples[r.useful_end_index..].fill(0);
@@ -179,6 +180,16 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
             }
           } else {
             warn!("send returned error");
+          }
+          iterations += 1;
+          if (iterations % 16) == 0 {
+            if let Some(real_now) = self.clock.now_ns() {
+              if wrapped_diff(real_now.try_into().unwrap(), now) > 5_000_000 {
+                warn!("blocked for >5ms, yielding to avoid CPU lockup");
+                std::thread::sleep(Duration::from_micros(2000));
+                return;
+              }
+            }
           }
         }
         if process_events && flow.expires.is_some() {
@@ -357,6 +368,7 @@ impl FlowsTransmitter {
     rx: mpsc::Receiver<Command>,
     sample_rate: u32,
     latency_ns: usize,
+    max_lag_samples: usize,
     channels_outputs: Vec<RBOutput<Sample, P>>,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
     current_timestamp: Arc<AtomicUsize>,
@@ -370,6 +382,7 @@ impl FlowsTransmitter {
       clock: MediaClock::new(false /* TODO */),
       channels_sources: channels_outputs,
       send_latency_samples: latency.try_into().unwrap(), // TODO in ALSA plugin should be 0, the more the worse because aplay wants to fill the whole buffer
+      max_lag_samples,
       timestamp_shift: (0 as ClockDiff).wrapping_sub_unsigned(latency.try_into().unwrap()),
       clock_offset_samples: (CLOCK_OFFSET_NS as i64 * sample_rate as i64 / 1_000_000_000i64)
         .try_into()
@@ -381,6 +394,7 @@ impl FlowsTransmitter {
   }
   pub fn start<P: ProxyToSamplesBuffer + Send + Sync + 'static>(
     self_info: Arc<DeviceInfo>,
+    tx_latency_ns: usize,
     mut media_clock_receiver: watch::Receiver<Option<ClockOverlay>>,
     channels_outputs: Vec<RBOutput<Sample, P>>,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
@@ -412,6 +426,8 @@ impl FlowsTransmitter {
         rx,
         srate,
         0, /*LATENCY TODO*/
+        // we set max_lag_samples to tx latency because it doesn't make sense to send samples older than that
+        (tx_latency_ns as u64 * srate as u64 / 1_000_000_000u64).try_into().unwrap(),
         channels_outputs,
         start_time_rx,
         current_timestamp,

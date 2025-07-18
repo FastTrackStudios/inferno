@@ -2,7 +2,7 @@
 
 [GitLab](https://gitlab.com/lumifaza/inferno) | [GitHub](https://github.com/teodly/inferno) | [Principal author's website](https://info.lumifaza.org/)
 
-This project is named after [a place](https://en.wikipedia.org/wiki/Inferno_(Dante)) destined for those who decided to keep the protocol undocumented.
+This project is named after [a place](https://en.wikipedia.org/wiki/Inferno_(Dante)) destined for those who create undocumented network protocols.
 
 Highly experimental for now. I don't recommend using it for serious purposes.
 

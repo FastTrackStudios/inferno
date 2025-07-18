@@ -296,6 +296,7 @@ impl DeviceServer {
 
     let (flows_tx_handle, flows_tx_thread) = flows_tx::FlowsTransmitter::start(
       self.self_info.clone(),
+      self.tx_latency_ns.try_into().unwrap(),
       clock_rx,
       rb_outputs.clone(),
       start_time_rx,
