@@ -68,7 +68,8 @@ Big thanks to [Project Pendulum](https://github.com/pendulum-project) (by [Trife
    * `cd statime && cargo build`
    * adjust network interface in `inferno-ptpv1.toml`
    * `sudo target/debug/statime -c inferno-ptpv1.toml`
-   * Disable global system time synchronization while Inferno is in use! (`systemctl stop chronyd.service`)
+   * Disable global system time synchronization while Inferno is in use (`systemctl stop chronyd.service`)
+     * Experimental clock guard has been added to our fork of Inferno, so if you're brave, you can skip it.
 5. Clone this repo with `--recursive` option (some dependencies are in submodules)
 6. `cd` to the desired program/library directory
    * simple command line audio recorder: [`Inferno2pipe`](inferno2pipe/README.md)
@@ -155,7 +156,7 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
 # Clocking options
 
 ## Software timestamping
-It is the default option, compatible with all NICs (network cards) and Dante devices. It is less stable than the others, unless you disable system time synchronization. It requires [our fork or the Statime daemon](https://github.com/teodly/statime/tree/inferno-dev).
+It is the default option, compatible with all NICs (network cards) and Dante devices. It requires [our fork or the Statime daemon](https://github.com/teodly/statime/tree/inferno-dev).
 
 Change the network interface in `inferno-ptpv1.toml` configuration file and run the daemon using:
 
@@ -163,17 +164,22 @@ Change the network interface in `inferno-ptpv1.toml` configuration file and run 
 sudo target/debug/statime -c inferno-ptpv1.toml
 ```
 
-You also need to disable time synchronization, usually one of the following commands will suffice:
+If you want extra stability, disable time synchronization, usually one of the following commands will suffice:
 ```
 sudo systemctl stop chronyd.service
 sudo systemctl stop systemd-timesyncd.service
 sudo systemctl stop ntpd.service
 ```
+This should no longer be needed if `virtual-system-clock-base` is set to `monotonic` or anything that starts with `monotonic`, but this fix/workaround is very young so take care.
+
+If you have high enough `TX_LATENCY_NS` and `RX_LATENCY_NS` configured (TODO: how high is enough?), you can try to use `monotonic_coarse` which should reduce CPU load.
 
 You can change the protocol from PTPv1 to PTPv2 in Statime configuration - this allows master operation (currently implemented only for PTPv2) so Inferno can be used even when no physical Dante device is in the network. But then at least one Dante device with AES67 enabled must be present in the network to make Inferno and Dante devices interoperate.
 
 ## Hardware timestamping
-If your network card supports hardware timestamping (check with `ethtool -T`), you can use its clock directly without relying on system clock. It is more accurate than software timestamping, meaning that you can potentially use lower audio latencies. Set the Inferno's configuration option `CLOCK_PATH` to PTP clock device path, usually `/dev/ptp0`.
+If your network card supports hardware timestamping (check with `ethtool -T`), you can use its clock directly without relying on system clock. It is more accurate than software timestamping, meaning that you can potentially use lower audio latencies.
+
+Set the Inferno's configuration option `CLOCK_PATH` to PTP clock device path, usually `/dev/ptp0`.
 
 If you require PTPv1 (Dante without AES67), you need to use our fork of Statime because there is no other open source PTPv1 daemon. In `inferno-ptpv1.toml`, set the `hardware-clock` option to `auto` and start the daemon:
 ```
@@ -190,6 +196,8 @@ or [unpatched (upstream) Statime](https://github.com/pendulum-project/statime).
 
 Audio packets latency jitter is similar when using Statime and ptp4l, however clock histogram in DC shows that ptp4l is doing more abrupt changes in the long run and Statime is unstable for a few seconds during startup.
 
+
+Be aware that Inferno queries the clock pretty often, which may put more load on the CPU than using system clock. If you want to avoid it but still have some benefits of hardware timestamping, specify `hardware-clock` in Statime config, but leave Inferno's `CLOCK_PATH` unset. Also read the [Software timestamping](#software-timestamping) section then.
 
 # Configuration
 Configuration can be set via:
@@ -210,6 +218,27 @@ All settings have default values. In a simple setup you should be able to start 
 * `RX_LATENCY_NS` - receive latency in nanoseconds, i.e. how much time to wait for media packets, relatively to PTP media clock. Equivalent to latency setting in Dante Controller. Defaults to 10ms. May be removed in future versions when it becomes settable from DC and so stored in a configuration file.
 * `TX_LATENCY_NS` - transmit latency in nanoseconds, i.e. receive latency that this device will demand from devices receiving from us. Equivalent to latency setting in Dante Virtual Soundcard. Defaults to 10ms.
 * `CLOCK_PATH` - path to either [usrvclock](https://gitlab.com/lumifaza/usrvclock) socket, or PTP device. If the latter, make sure [you are allowed](https://gitlab.freedesktop.org/pipewire/pipewire/-/blob/78642cc53bd84c2ad529f2175cc50a658d1e52c0/src/daemon/90-pipewire-aes67-ptp.rules) to read it. Also, write permissions are required if you want to see actual frequency offset in DC. (the clock is never adjusted from within Inferno, but the syscall to read the frequency requires write access)
+
+
+# Audio stability tips
+
+## Set appropriate latency
+
+Disable Inferno. Run cyclictest for at least 20 minutes, while doing things that you normally do with the computer:
+
+    cyclictest --mlockall --smp --priority=80 --interval=5000 --distance=0
+
+You can also add some artificial system load:
+
+    stress -m `nproc` -c `nproc`
+
+In cyclictest output, the last column is the worst-case latency in microseconds. Multiply it by 1000, add some margin and time for network transfer and you get the lowest safe value for `TX_LATENCY_NS` and `RX_LATENCY_NS`. If the values are higher than your acceptable latency, you will have hard time using Inferno (and computer audio in general). Also keep in mind that the maximum latency that Dante officially allows is 40ms. You can try to follow tutorials to make latency more predictable:
+
+* [Professional audio @ Arch wiki](https://wiki.archlinux.org/title/Professional_audio) (not just for Arch)
+* [Performance tuning @ PipeWire wiki](https://wiki.archlinux.org/title/Professional_audio)
+* [Fedora Pipewire Low Latency Audio Configuration Reference Guide](https://linuxmusicians.com/viewtopic.php?t=27121) (Fedora-specific)
+* isolate CPU cores using `isolcpus` [or `cset`](https://unix.stackexchange.com/a/692558) and pin audio processes and network card IRQ to the isolated cores
+* if nothing else helps, try `PREEMPT_RT` kernel
 
 
 # Contributing
@@ -238,6 +267,17 @@ If you want to contribute but can't code or don't know where to start because th
 
 
 # Changelog
+
+## 0.4.3
+* support monotonic clock as base with jump-preventing guard (Statime)
+* reduced snowball effect when CPU is overloaded, transmitter is lagging and tries to transmit multiple packets at once: max lag is set to `TX_LATENCY_NS`, and if transmit thread is locked for more than 5ms, 2ms sleep will be forced
+
+## 0.4.2
+* optimization: remove modulo division from ringbuffer index calculations
+
+## 0.4.1
+* disable SafeClock for now, doesn't help much and harms PHC
+* fix panic on devices that can tx high number of channels per flow (e.g. Behringer Wing)
 
 ## 0.4.0
 * refactor - preparation to introduction of controller functionality
