@@ -39,5 +39,8 @@ So the Inferno ALSA PCM is intended to be constantly running. The easiest way of
 |---|---|---|---|
 | [PipeWire](https://pipewire.org/) | 1.2.7 | ✅ OK  | needs [service patch](../os_integration/systemd_allow_clock.conf) if launched by systemd |
 | [spotifyd](https://github.com/Spotifyd/spotifyd) | ... | ✅ OK  | [source](https://gist.github.com/scientress/b7fd79ac761a8574842b96f15696c2b7) |
-| [JACK](https://jackaudio.org/) | ... | ❌ TODO | [source](https://github.com/teodly/inferno/issues/8#issuecomment-2784660805) |
+| 🔒 HQPlayer | ... | ❔ maybe fixed? | [didn't work](https://github.com/teodly/inferno/issues/9), maybe fixed together with JACK? |
+| [JACK](https://jackaudio.org/) | 1.9.22-r4 | ✅❔ experimental | [didn't work](https://github.com/teodly/inferno/issues/8#issuecomment-2784660805), now part of containerized automated test |
 | Audacity | <= 3.5.1        | ✖ WONTFIX | does not support S32 samples so no zero-copy buffers |
+
+🔒 - non-FOSS apps, discouraged by Inferno developers

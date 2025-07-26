@@ -34,7 +34,7 @@ Big thanks to [Project Pendulum](https://github.com/pendulum-project) (by [Trife
 | Stream audio from/to modern Dante hardware | ✅ Yes | ✅ Yes | ✅ Yes |
 | Stream audio from/to DVS, Dante Via & old Dante hardware | ✅ Yes | ✅ Yes | 🚫 No  |
 | Stream audio from/to AES67           | 🚫 No  | 🚫 No  | ✅ Yes |
-| Minimum latency | as low as your kernel gets | 4ms | ... | 
+| Minimum latency | as low as your kernel gets | 4ms | ... |
 | Sends & receives multicasts | ✅ Yes | ✅ Yes | ✅ Yes |
 | OS integration | Entirely user-space | Kernel driver & user-space services | Kernel driver & user-space helper |
 | Lightweight recording app | ✅ Yes (Inferno2pipe) | 🚫 No | ☑️ FFmpeg with RTP input does the trick |
@@ -97,6 +97,16 @@ Currently the only dependency needed on the target system is the ALSA library, i
 Installing dependencies on your host system is not needed - `cross` does it inside its container according to instructions from `Cargo.toml`.
 
 If you need to compile for a different architecture, add it to `Cargo.toml` (copy-paste the `workspace.metadata.cross.target` section) before running `cross`. It is needed only for `alsa_pcm_inferno`. Statime does not have any shared library dependencies.
+
+
+## Do you prefer Docker?
+This won't work with usual desktop system usage, but if you are packaging an audio application using ALSA, into a Docker container, we've got you covered! See the directory `test/containerized_trx` for inspiration.
+
+Remember that:
+* Clock synchronization is still your responsibility. I didn't want to complicate the base image with service management so PTP daemon is not included. `usrvclock-rs` requires the sockets path (including client sockets) to be the same for all containers so a shared volume for `/tmp` is required. Future versions may include Statime as a separate container.
+* Dante protocol requires good timing. Allow realtime priorities.
+* Network routing (incl. multicast) may be tricky to configure correctly but `--network=host` is your friend. Or bridge the container with your AoIP network. NAT is your enemy.
+* To have state persistence, mount `/root/.local/state/inferno_aoip` as a volume (or different user's if you application is not running as root)
 
 
 # Legal and moral stuff
