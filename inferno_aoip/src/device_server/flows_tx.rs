@@ -107,7 +107,7 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
 }
 
 impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
-  fn now(&mut self) -> Option<Clock> {
+  fn now(&self) -> Option<Clock> {
     self.clock.now_in_timebase(self.sample_rate as u64)
   }
 
@@ -116,6 +116,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     let mut tmp_samples = [0 as Sample; FPP_MAX as usize];
     let mut pbuff = [0u8; MTU];
     let sample_rate = self.sample_rate;
+    let max_awake_time_samples = (self.sample_rate / 200) as ClockDiff;
     let max_lag_samples = self.max_lag_samples;
     let mut iterations = 0;
     let mut max_missing_samples = 0;
@@ -186,10 +187,10 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         }
         iterations += 1;
         if (iterations % 16) == 0 {
-          if let Some(real_now) = self.clock.now_ns() {
-            // FIXME timebase inconsistency!!!
-            if wrapped_diff(real_now.try_into().unwrap(), now) > 5_000_000 {
-              warn!("blocked for >5ms, yielding to avoid CPU lockup");
+          if let Some(real_now) = self.clock.now_in_timebase(self.sample_rate as u64) {
+            let diff = wrapped_diff(real_now.try_into().unwrap(), now);
+            if diff > max_awake_time_samples {
+              warn!("blocked for {diff} samples, yielding to avoid CPU lockup");
               std::thread::sleep(Duration::from_micros(2000));
               return;
             }

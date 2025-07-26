@@ -19,7 +19,6 @@ pub type FineClockDiff = i64;
 //#[derive(Clone)]
 pub struct MediaClock {
   overlay: Option<ClockOverlay>,
-  safe: Option<SafeClock>,
 }
 
 #[inline(always)]
@@ -29,8 +28,8 @@ fn timestamp_to_clock_value(ts: clock_steering::Timestamp) -> FineClock {
 
 impl MediaClock {
   pub fn new(use_safe_clock: bool) -> Self {
-    let safe = if use_safe_clock { Some(SafeClock::new(0.01, 3_000_000_000)) } else { None };
-    Self { overlay: None, safe }
+    assert!(!use_safe_clock);
+    Self { overlay: None }
   }
   pub fn is_ready(&self) -> bool {
     self.overlay.is_some()
@@ -51,21 +50,11 @@ impl MediaClock {
     self.overlay = Some(overlay);
   }
   #[inline(always)]
-  pub fn now_ns(&mut self) -> Option<FineClock> {
-    self.overlay.map(|overlay| {
-      if let Some(safe) = &mut self.safe {
-        let safe_ts = safe.now(&overlay);
-        if safe_ts.estimated {
-          warn!("using estimated clock because of possible jump!");
-        }
-        safe_ts.nanos as FineClock
-      } else {
-        overlay.now_ns() as FineClock
-      }
-    })
+  pub fn now_ns(&self) -> Option<FineClock> {
+    self.overlay.map(|overlay| overlay.now_ns() as FineClock)
   }
   #[inline(always)]
-  pub fn now_in_timebase(&mut self, timebase_hz: u64) -> Option<Clock> {
+  pub fn now_in_timebase(&self, timebase_hz: u64) -> Option<Clock> {
     self.now_ns().map(|ns| {
       // TODO it will jump when underlying wraps
       ((ns as u128) * (timebase_hz as u128) / 1_000_000_000u128) as Clock
