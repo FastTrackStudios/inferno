@@ -13,18 +13,21 @@ use rand::{thread_rng, Rng, SeedableRng};
 use tokio::sync::watch;
 use tokio::{select, sync::mpsc};
 
-use crate::util::os::set_current_thread_realtime;
-use crate::ring_buffer::{ProxyToSamplesBuffer, RBOutput};
 use super::samples_utils::*;
 use super::tx_multicasts::MEDIA_PORT;
+use crate::device_server::TransferNotifier;
+use crate::media_clock::async_clock_receiver_to_realtime;
+use crate::ring_buffer::{ProxyToSamplesBuffer, RBOutput};
+use crate::util::os::set_current_thread_realtime;
+use crate::util::real_time_box_channel::RealTimeBoxReceiver;
 use crate::util::thread::run_future_in_new_thread;
-use crate::{common::*, device_info::DeviceInfo};
 use crate::{
+  common::Sample,
   media_clock::{ClockOverlay, MediaClock},
   net_utils::MTU,
   protocol::flows_control::FlowHandle,
-  common::Sample,
 };
+use crate::{common::*, device_info::DeviceInfo};
 
 pub const FPP_MIN: u16 = 2;
 pub const FPP_MAX: u16 = 256;
@@ -35,6 +38,7 @@ pub const KEEPALIVE_TIMEOUT_SECONDS: Clock = 4;
 pub const DISCONTINUITY_THRESHOLD_SAMPLES: usize = 192000;
 const BUFFERED_SAMPLES_PER_CHANNEL: usize = 65536;
 pub const SELECT_THRESHOLD: Duration = Duration::from_millis(100);
+pub const PROCESS_EVENTS_INTERVAL: Duration = Duration::from_millis(33);
 pub const MIN_SLEEP: Duration = Duration::from_millis(0); // to save CPU cycles, TODO: make it configurable via some "eco mode" flag
 
 // it's better to have the clock in the past than in the future - otherwise Dante devices receiving from us go mad and fart
@@ -84,11 +88,11 @@ enum Command {
     index: usize,
     channel_indices: Vec<Option<usize>>,
   },
-  UpdateClockOverlay(ClockOverlay),
 }
 
 struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
   commands_receiver: mpsc::Receiver<Command>,
+  clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
   sample_rate: u32,
   flows: Vec<Option<Flow>>,
   clock: MediaClock,
@@ -98,7 +102,7 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
   max_lag_samples: usize,
   timestamp_shift: ClockDiff,
   current_timestamp: Arc<AtomicUsize>,
-  on_transfer: Option<Box<dyn Fn() + Send>>,
+  on_transfer: Option<TransferNotifier>,
   //callback: SamplesRequestCallback,
 }
 
@@ -108,109 +112,105 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
   }
 
   #[inline(always)]
-  fn transmit(&mut self, dither_rng: &mut SmallRng, process_events: bool) {
+  fn transmit(&mut self, dither_rng: &mut SmallRng, now: Clock, process_events: bool) {
     let mut tmp_samples = [0 as Sample; FPP_MAX as usize];
     let mut pbuff = [0u8; MTU];
     let sample_rate = self.sample_rate;
     let max_lag_samples = self.max_lag_samples;
     let mut iterations = 0;
-    if let Some(now) = self.now() {
-      let mut max_missing_samples = 0;
-      for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
-        if flow.expired.load(Ordering::Relaxed) {
-          continue;
-        }
-        let channels_in_flow = flow.channel_indices.len();
-        let stride = channels_in_flow * flow.bytes_per_sample;
-        let lag = wrapped_diff(now, flow.next_ts);
-        if lag > max_lag_samples as ClockDiff {
-          error!("tx lag of {} samples detected, or media clock jumped, dropout occurs!", lag);
-          flow.bootstrap_next_ts(now);
-        }
-        if lag < -(DISCONTINUITY_THRESHOLD_SAMPLES as ClockDiff) {
-          error!("media clock jumped: {}", lag);
-          flow.bootstrap_next_ts(now);
-        }
-        pbuff[9..9 + stride * flow.fpp].fill(0);
-        while wrapped_diff(now, flow.next_ts) >= 0 {
-          pbuff[0] = 2u8; // ???
-          let packet_ts = flow.next_ts.wrapping_add_signed(self.clock_offset_samples) /* .wrapping_sub(flow.fpp) */; // ???
-          let seconds = packet_ts / (sample_rate as Clock);
-          let subsec_samples = packet_ts % (sample_rate as Clock);
-          pbuff[1..5].copy_from_slice(&(seconds as u32).to_be_bytes());
-          pbuff[5..9].copy_from_slice(&(subsec_samples as u32).to_be_bytes());
-          let start_ts = flow.next_ts.wrapping_add_signed(self.timestamp_shift);
-          for (index_in_flow, &ch_opt) in flow.channel_indices.iter().enumerate() {
-            if let Some(ch_index) = ch_opt {
-              //(self.callback)(flow.next_ts, ch_index, &mut tmp_samples[0..flow.fpp]);
-              // TODO remove not really necessary copy to tmp_samples, write_*_samples could read directly from ring buffer
-              let r =
-                self.channels_sources[ch_index].read_at(start_ts as usize, &mut tmp_samples[0..flow.fpp]);
-              if r.useful_start_index != 0 || r.useful_end_index != flow.fpp {
-                /* error!(
+    let mut max_missing_samples = 0;
+    for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
+      if flow.expired.load(Ordering::Relaxed) {
+        continue;
+      }
+      let channels_in_flow = flow.channel_indices.len();
+      let stride = channels_in_flow * flow.bytes_per_sample;
+      let lag = wrapped_diff(now, flow.next_ts);
+      if lag > max_lag_samples as ClockDiff {
+        error!("tx lag of {} samples detected, or media clock jumped, dropout occurs!", lag);
+        flow.bootstrap_next_ts(now);
+      }
+      if lag < -(DISCONTINUITY_THRESHOLD_SAMPLES as ClockDiff) {
+        error!("media clock jumped: {}", lag);
+        flow.bootstrap_next_ts(now);
+      }
+      pbuff[9..9 + stride * flow.fpp].fill(0);
+      while wrapped_diff(now, flow.next_ts) >= 0 {
+        pbuff[0] = 2u8; // ???
+        let packet_ts = flow.next_ts.wrapping_add_signed(self.clock_offset_samples) /* .wrapping_sub(flow.fpp) */; // ???
+        let seconds = packet_ts / (sample_rate as Clock);
+        let subsec_samples = packet_ts % (sample_rate as Clock);
+        pbuff[1..5].copy_from_slice(&(seconds as u32).to_be_bytes());
+        pbuff[5..9].copy_from_slice(&(subsec_samples as u32).to_be_bytes());
+        let start_ts = flow.next_ts.wrapping_add_signed(self.timestamp_shift);
+        for (index_in_flow, &ch_opt) in flow.channel_indices.iter().enumerate() {
+          if let Some(ch_index) = ch_opt {
+            //(self.callback)(flow.next_ts, ch_index, &mut tmp_samples[0..flow.fpp]);
+            // TODO remove not really necessary copy to tmp_samples, write_*_samples could read directly from ring buffer
+            let r =
+              self.channels_sources[ch_index].read_at(start_ts as usize, &mut tmp_samples[0..flow.fpp]);
+            if r.useful_start_index != 0 || r.useful_end_index != flow.fpp {
+              /* error!(
                   "didn't have enough samples, transmitting silence. {} {}",
                   r.useful_start_index,
                   flow.fpp - r.useful_end_index
-                ); */
+              ); */
 
-                tmp_samples[0..r.useful_start_index].fill(0);
-                tmp_samples[r.useful_end_index..].fill(0);
+              tmp_samples[0..r.useful_start_index].fill(0);
+              tmp_samples[r.useful_end_index..].fill(0);
 
-                let missing_samples = r.useful_start_index + flow.fpp - r.useful_end_index;
-                max_missing_samples = max_missing_samples.max(missing_samples);
-              }
-              let start = 9 + index_in_flow * flow.bytes_per_sample;
-              let samples = &tmp_samples[0..flow.fpp];
-              match flow.bytes_per_sample {
-                2 => write_s16_samples(samples, &mut pbuff, start, stride, Some(dither_rng)),
-                3 => write_s24_samples(samples, &mut pbuff, start, stride, Some(dither_rng)),
-                4 => write_s32_samples::<_, SmallRng>(samples, &mut pbuff, start, stride, None),
-                other => {
-                  error!("BUG: unsupported bytes per sample {}", other);
-                }
-              }
+              let missing_samples = r.useful_start_index + flow.fpp - r.useful_end_index;
+              max_missing_samples = max_missing_samples.max(missing_samples);
             }
-          }
-          let to_send = 9 + stride * flow.fpp;
-          if let Ok(written) = flow.socket.send(&pbuff[0..to_send]) {
-            if written == to_send {
-              flow.next_ts = flow.next_ts.wrapping_add(flow.fpp.try_into().unwrap());
-            } else {
-              warn!("written {written}, should have {to_send}");
-            }
-          } else {
-            warn!("send returned error");
-          }
-          iterations += 1;
-          if (iterations % 16) == 0 {
-            if let Some(real_now) = self.clock.now_ns() {
-              if wrapped_diff(real_now.try_into().unwrap(), now) > 5_000_000 {
-                warn!("blocked for >5ms, yielding to avoid CPU lockup");
-                std::thread::sleep(Duration::from_micros(2000));
-                return;
+            let start = 9 + index_in_flow * flow.bytes_per_sample;
+            let samples = &tmp_samples[0..flow.fpp];
+            match flow.bytes_per_sample {
+              2 => write_s16_samples(samples, &mut pbuff, start, stride, Some(dither_rng)),
+              3 => write_s24_samples(samples, &mut pbuff, start, stride, Some(dither_rng)),
+              4 => write_s32_samples::<_, SmallRng>(samples, &mut pbuff, start, stride, None),
+              other => {
+                error!("BUG: unsupported bytes per sample {}", other);
               }
             }
           }
         }
-        if process_events && flow.expires.is_some() {
-          if let Ok(_) = flow.socket.recv(&mut pbuff) {
-            flow.keep_alive(now, sample_rate);
-          } else if wrapped_diff(flow.expires.unwrap(), now) < 0 {
-            flow.expired.store(true, Ordering::Release);
-            info!("flow dst {:?} expired", flow.socket.peer_addr().ok());
+        let to_send = 9 + stride * flow.fpp;
+        if let Ok(written) = flow.socket.send(&pbuff[0..to_send]) {
+          if written == to_send {
+            flow.next_ts = flow.next_ts.wrapping_add(flow.fpp.try_into().unwrap());
+          } else {
+            warn!("written {written}, should have {to_send}");
+          }
+        } else {
+          warn!("send returned error");
+        }
+        iterations += 1;
+        if (iterations % 16) == 0 {
+          if let Some(real_now) = self.clock.now_ns() {
+            // FIXME timebase inconsistency!!!
+            if wrapped_diff(real_now.try_into().unwrap(), now) > 5_000_000 {
+              warn!("blocked for >5ms, yielding to avoid CPU lockup");
+              std::thread::sleep(Duration::from_micros(2000));
+              return;
+            }
           }
         }
       }
-      self.on_transfer.as_ref().map(|cb| cb());
-    } else if self.flows.len() > 0 {
-      error!("clock unavailable, can't transmit. is the PTP daemon running?");
+      if process_events && flow.expires.is_some() {
+        if let Ok(_) = flow.socket.recv(&mut pbuff) {
+          flow.keep_alive(now, sample_rate);
+        } else if wrapped_diff(flow.expires.unwrap(), now) < 0 {
+          flow.expired.store(true, Ordering::Release);
+          info!("flow dst {:?} expired", flow.socket.peer_addr().ok());
+        }
+      }
     }
   }
 
   async fn run(&mut self, mut start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>) {
     let sample_rate = self.sample_rate;
+    let process_events_interval = (sample_rate / 30) as Clock;
     let mut dither_rng = SmallRng::from_rng(rand::thread_rng()).unwrap();
-    let mut counter = Wrapping(0u32);
 
     if let Some(rx) = &mut start_time_rx {
       match rx.await {
@@ -226,6 +226,31 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       }
     }
 
+    let now = loop {
+      self.clock_recv.update();
+      if let Some(clkovl) = self.clock_recv.get() {
+        let had_clock = self.clock.is_ready(); // TODO simplify
+        self.clock.update_overlay(*clkovl);
+        if !had_clock {
+          let now = self.now().unwrap();
+          for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
+            flow.bootstrap_next_ts(now);
+            flow.keep_alive(now, self.sample_rate);
+          }
+        }
+      }
+      let now_opt = self.now();
+      if let Some(now) = now_opt {
+        break now;
+      } else {
+        error!("clock unavailable, can't transmit. is the PTP daemon running? (@init)");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+      }
+    };
+    let mut next_on_transfer = now;
+    let mut next_process_events = now;
+    drop(now);
+
     set_current_thread_realtime(81);
     loop {
       let min_next_ts = self
@@ -235,56 +260,121 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         .filter(|flow| !flow.expired.load(Ordering::Relaxed))
         .map(|&ref flow| flow.next_ts)
         .min_by(|&a, &b| wrapped_diff(a, b).cmp(&0));
-      let sleep_duration = min_next_ts
-        .and_then(|ts| self.clock.system_clock_duration_until(ts, sample_rate as u64))
+
+      let sleep_until =
+        [min_next_ts, if self.on_transfer.is_some() { Some(next_on_transfer) } else { None }]
+          .into_iter()
+          .filter_map(|opt| opt)
+          .min_by(|&a, &b| wrapped_diff(a, b).cmp(&0));
+
+      if self.clock_recv.update() {
+        if let Some(ovl) = self.clock_recv.get() {
+          self.clock.update_overlay(*ovl);
+        }
+      }
+      let now = if let Some(now) = self.now() {
+        now
+      } else {
+        error!("clock unavailable, can't transmit. is the PTP daemon running? (@get now)");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        continue;
+      };
+
+      let sleep_duration = sleep_until
+        .and_then(|ts| self.clock.system_clock_duration_from_until(now, ts, sample_rate as u64)) // TODO: this may break on 32-bit systems
         .unwrap_or(std::time::Duration::from_secs(20))
         .max(MIN_SLEEP);
-      let mut process_events = (counter.0 % 32) == 0;
-      counter += 1;
 
       let command = if sleep_duration < SELECT_THRESHOLD {
+        // on_transfer callback must be called to notify about transmission in previous iteration,
+        // after updating current timestamp, before waiting
         let cur_ts_opt =
           min_next_ts.map(|n| n as usize).map(|n| if n == usize::MAX { usize::MAX - 1 } else { n });
         self
           .current_timestamp
           .store(cur_ts_opt.unwrap_or(usize::MAX), Ordering::SeqCst /*TODO: really needed?*/);
+        self.on_transfer.as_ref().map(|transfer| (transfer.callback)());
+
         if !sleep_duration.is_zero() {
           std::thread::sleep(sleep_duration);
         }
-        self.transmit(&mut dither_rng, process_events);
-        if process_events {
-          self.commands_receiver.try_recv().unwrap_or(Command::NoOp)
+        if let Some(now) = self.now() {
+          let process_events = wrapped_diff(now, next_process_events) >= 0;
+          self.transmit(&mut dither_rng, now, process_events);
+          if process_events {
+            next_process_events = now.wrapping_add(process_events_interval);
+            self.commands_receiver.try_recv().unwrap_or(Command::NoOp)
+          } else {
+            Command::NoOp
+          }
         } else {
-          Command::NoOp
+          error!("clock unavailable, can't transmit. is the PTP daemon running? (@non-select)");
+          self.commands_receiver.try_recv().unwrap_or(Command::NoOp)
         }
       } else {
+        // on_transfer callback must be called to notify about transmission in previous iteration,
+        // after updating current timestamp, before waiting
         self.current_timestamp.store(usize::MAX, Ordering::SeqCst);
-        process_events = true;
+        self.on_transfer.as_ref().map(|transfer| (transfer.callback)());
+
         select! {
           recv_opt = self.commands_receiver.recv() => {
             recv_opt.unwrap_or(Command::Shutdown)
           },
           _ = tokio::time::sleep(sleep_duration) => {
-            self.transmit(&mut dither_rng, process_events);
+            if let Some(now) = self.now() {
+              self.transmit(&mut dither_rng, now, true);
+            } else {
+              error!("clock unavailable, can't transmit. is the PTP daemon running? (@select)");
+            }
             Command::NoOp
           }
         }
       };
+
+      let now_opt = if self.on_transfer.is_some() { self.now() } else { None };
+      if let Some(transfer) = self.on_transfer.as_ref() {
+        if let Some(now) = now_opt {
+          if wrapped_diff(next_on_transfer, now) <= 0 {
+            // TODO: /2 is a HACK
+            next_on_transfer = next_on_transfer.wrapping_add(transfer.max_interval_samples / 2);
+            let diff = wrapped_diff(next_on_transfer, now);
+            if diff < 0 || diff > (transfer.max_interval_samples * 2).try_into().unwrap() {
+              warn!("clock jumped, sanitizing next_on_transfer");
+              next_on_transfer = now.wrapping_add(transfer.max_interval_samples);
+            }
+          } else {
+            next_on_transfer = now.wrapping_add(transfer.max_interval_samples);
+          }
+        } else {
+          error!(
+            "clock unavailable, can't set next transfer notification time. is the PTP daemon running?"
+          );
+        }
+      }
+
       match command {
         Command::Shutdown => {
           break;
         }
-        Command::AddFlow { index, socket, channel_indices, fpp, bytes_per_sample, needs_keepalives, expired } => {
-          let mut flow =
-            Flow {
-              socket,
-              channel_indices,
-              next_ts: 0,
-              fpp,
-              bytes_per_sample,
-              expires: if needs_keepalives { Some(0) } else { None },
-              expired
-            };
+        Command::AddFlow {
+          index,
+          socket,
+          channel_indices,
+          fpp,
+          bytes_per_sample,
+          needs_keepalives,
+          expired,
+        } => {
+          let mut flow = Flow {
+            socket,
+            channel_indices,
+            next_ts: 0,
+            fpp,
+            bytes_per_sample,
+            expires: if needs_keepalives { Some(0) } else { None },
+            expired,
+          };
           if let Some(now) = self.now() {
             flow.bootstrap_next_ts(now);
             if needs_keepalives {
@@ -310,17 +400,6 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
               flow.bootstrap_next_ts(now);
             }
             flow.expired.store(false, Ordering::Release);
-          }
-        }
-        Command::UpdateClockOverlay(clkovl) => {
-          let had_clock = self.clock.is_ready();
-          self.clock.update_overlay(clkovl);
-          if !had_clock {
-            let now = self.now().unwrap();
-            for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
-              flow.bootstrap_next_ts(now);
-              flow.keep_alive(now, self.sample_rate);
-            }
           }
         }
         Command::NoOp => {}
@@ -366,17 +445,19 @@ fn split_handle(h: FlowHandle) -> (u32, u16) {
 impl FlowsTransmitter {
   async fn run<P: ProxyToSamplesBuffer>(
     rx: mpsc::Receiver<Command>,
+    clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
     sample_rate: u32,
     latency_ns: usize,
     max_lag_samples: usize,
     channels_outputs: Vec<RBOutput<Sample, P>>,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
     current_timestamp: Arc<AtomicUsize>,
-    on_transfer: Option<Box<dyn Fn() + Send>>,
+    on_transfer: Option<TransferNotifier>,
   ) {
     let latency: u32 = (latency_ns as u64 * sample_rate as u64 / 1_000_000_000u64).try_into().unwrap();
     let mut internal = FlowsTransmitterInternal {
       commands_receiver: rx,
+      clock_recv,
       sample_rate,
       flows: (0..MAX_FLOWS).map(|_| None).collect_vec(),
       clock: MediaClock::new(false /* TODO */),
@@ -395,35 +476,20 @@ impl FlowsTransmitter {
   pub fn start<P: ProxyToSamplesBuffer + Send + Sync + 'static>(
     self_info: Arc<DeviceInfo>,
     tx_latency_ns: usize,
-    mut media_clock_receiver: watch::Receiver<Option<ClockOverlay>>,
+    clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
     channels_outputs: Vec<RBOutput<Sample, P>>,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
     current_timestamp: Arc<AtomicUsize>,
-    on_transfer: Option<Box<dyn Fn() + Send>>,
+    on_transfer: Option<TransferNotifier>,
   ) -> (Self, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(100);
     let tx1 = tx.clone();
-    tokio::spawn(async move {
-      loop {
-        let overlay_opt = media_clock_receiver.borrow_and_update().clone();
-        if let Some(overlay) = overlay_opt {
-          if tx1.send(Command::UpdateClockOverlay(overlay)).await.is_err() {
-            break;
-          }
-        }
-        match media_clock_receiver.changed().await {
-          Ok(()) => {}
-          Err(_) => {
-            break;
-          }
-        }
-      }
-    });
     let srate = self_info.sample_rate;
     // TODO dehardcode latency_ns
     let thread_join = run_future_in_new_thread("flows TX", move || {
       Self::run(
         rx,
+        clock_recv,
         srate,
         0, /*LATENCY TODO*/
         // we set max_lag_samples to tx latency because it doesn't make sense to send samples older than that
@@ -470,7 +536,8 @@ impl FlowsTransmitter {
         self.scan_expired().await;
         let mut counter = 0;
         let flow_index = loop {
-          let flow_index = requested_flow_index.unwrap_or_else(|| self.flow_seq_id.fetch_add(1, atomic::Ordering::AcqRel) % MAX_FLOWS);
+          let flow_index = requested_flow_index
+            .unwrap_or_else(|| self.flow_seq_id.fetch_add(1, atomic::Ordering::AcqRel) % MAX_FLOWS);
           if !self.flows.contains_key(&flow_index) {
             if requested_flow_index.is_some() && self.flows_info[flow_index as usize].is_some() {
               error!("requested flow index which is reserved: {flow_index}");
@@ -513,7 +580,7 @@ impl FlowsTransmitter {
             expired: flow.expired.clone(),
           })
           .await
-          .map_err(|_|std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+          .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
 
         let cookie = flow.cookie;
         self.flows.insert(flow_index, flow);
@@ -599,14 +666,11 @@ impl FlowsTransmitter {
       let channel_indices = channel_indices.into_iter().collect_vec();
       self
         .commands_sender
-        .send(Command::SetChannels {
-          index: index as usize,
-          channel_indices: channel_indices.clone(),
-        })
+        .send(Command::SetChannels { index: index as usize, channel_indices: channel_indices.clone() })
         .await
         .unwrap();
 
-        self.flows_info[index as usize].as_mut().unwrap().local_channel_indices = channel_indices;
+      self.flows_info[index as usize].as_mut().unwrap().local_channel_indices = channel_indices;
       Ok(index as usize)
     } else {
       Err(std::io::Error::from(std::io::ErrorKind::NotFound))
@@ -617,7 +681,9 @@ impl FlowsTransmitter {
       .flows
       .iter()
       .filter_map(|(index, flow)| {
-        if flow.expired.load(Ordering::Acquire) && !self.flows_info[*index as usize].as_ref().unwrap().is_multicast() {
+        if flow.expired.load(Ordering::Acquire)
+          && !self.flows_info[*index as usize].as_ref().unwrap().is_multicast()
+        {
           info!("removing expired flow (internal id {index}) dst {}", flow.remote);
           Some(*index)
         } else {

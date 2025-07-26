@@ -6,8 +6,8 @@ pub use usrvclock::AsyncClient as ClockReceiver;
 pub use usrvclock::ClockOverlay;
 use usrvclock::SafeClock;
 
-use crate::util::real_time_box_channel::{self, RealTimeBoxReceiver};
 use crate::common::*;
+use crate::util::real_time_box_channel::{self, RealTimeBoxReceiver};
 pub type RealTimeClockReceiver = RealTimeBoxReceiver<Option<ClockOverlay>>;
 
 /// High-precision clock (nanoseconds)
@@ -29,11 +29,7 @@ fn timestamp_to_clock_value(ts: clock_steering::Timestamp) -> FineClock {
 
 impl MediaClock {
   pub fn new(use_safe_clock: bool) -> Self {
-    let safe = if use_safe_clock {
-      Some(SafeClock::new(0.01, 3_000_000_000))
-    } else {
-      None
-    };
+    let safe = if use_safe_clock { Some(SafeClock::new(0.01, 3_000_000_000)) } else { None };
     Self { overlay: None, safe }
   }
   pub fn is_ready(&self) -> bool {
@@ -81,8 +77,25 @@ impl MediaClock {
     timebase_hz: u64,
   ) -> Option<std::time::Duration> {
     let now_ns = self.now_ns()?;
-    let to_ns = (timestamp as u128 * 1_000_000_000u128 / timebase_hz as u128) as FineClock;
-    let remaining = (to_ns as FineClockDiff).wrapping_sub(now_ns as FineClockDiff);
+    let until_ns = (timestamp as u128 * 1_000_000_000u128 / timebase_hz as u128) as FineClock;
+    let remaining = (until_ns as FineClockDiff).wrapping_sub(now_ns as FineClockDiff);
+    let corr = (remaining as f64 * self.overlay?.freq_scale) as FineClockDiff;
+    let duration = remaining - corr; // FIXME it should be * 1/(1+freq_scale) but should be good enough for low correction values
+    if duration > 0 {
+      Some(std::time::Duration::from_nanos(duration as u64))
+    } else {
+      Some(std::time::Duration::from_secs(0))
+    }
+  }
+  pub fn system_clock_duration_from_until(
+    &mut self,
+    from: Clock,
+    until: Clock,
+    timebase_hz: u64,
+  ) -> Option<std::time::Duration> {
+    let until_ns = (until as u128 * 1_000_000_000u128 / timebase_hz as u128) as FineClock;
+    let from_ns = (from as u128 * 1_000_000_000u128 / timebase_hz as u128) as FineClock;
+    let remaining = (until_ns as FineClockDiff).wrapping_sub(from_ns as FineClockDiff);
     let corr = (remaining as f64 * self.overlay?.freq_scale) as FineClockDiff;
     let duration = remaining - corr; // FIXME it should be * 1/(1+freq_scale) but should be good enough for low correction values
     if duration > 0 {
@@ -100,7 +113,10 @@ pub fn start_clock_receiver(path: Option<PathBuf>) -> ClockReceiver {
   )
 }
 
-pub async fn make_shared_media_clock(receiver: &ClockReceiver, use_safe_clock: bool) -> Arc<RwLock<MediaClock>> {
+pub async fn make_shared_media_clock(
+  receiver: &ClockReceiver,
+  use_safe_clock: bool,
+) -> Arc<RwLock<MediaClock>> {
   let mut rx = receiver.subscribe();
   let media_clock = MediaClock::new(use_safe_clock);
   /* loop {

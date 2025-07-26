@@ -99,8 +99,11 @@ pub struct RealTimeSamplesReceiver<P: ProxyToSamplesBuffer> {
 // MAYBE TODO move timestamp checks to separate module
 
 impl<P: ProxyToSamplesBuffer> RealTimeSamplesReceiver<P> {
-  fn get_min_max_end_timestamps(&self) -> Option<(Clock, Clock)> {
-    get_min_max_end_timestamps(self.channels.iter().map(|chrecv| chrecv.get()))
+  fn get_min_max_end_timestamps(&mut self) -> Option<(Clock, Clock)> {
+    get_min_max_end_timestamps(self.channels.iter_mut().map(|chrecv| {
+      chrecv.update();
+      chrecv.get()
+    }))
   }
   pub fn get_available_num_samples(&mut self, start_timestamp: Clock) -> usize {
     self

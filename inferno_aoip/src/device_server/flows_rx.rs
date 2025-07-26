@@ -1,9 +1,10 @@
+use super::samples_utils::*;
 use crate::device_info::DeviceInfo;
+use crate::device_server::TransferNotifier;
 use crate::net_utils::MTU;
+use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RingBufferShared};
 use crate::util::os::set_current_thread_realtime;
 use crate::util::real_time_box_channel::RealTimeBoxReceiver;
-use crate::ring_buffer::{ProxyToSamplesBuffer, RBInput, RingBufferShared};
-use super::samples_utils::*;
 use crate::{common::*, media_clock::MediaClock};
 
 use std::io::ErrorKind::WouldBlock;
@@ -86,7 +87,7 @@ struct FlowsReceiverInternal<P: ProxyToSamplesBuffer> {
   clock: MediaClock,
   clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
   ref_instant: Instant,
-  on_transfer: Option<Box<dyn Fn() + Send>>,
+  on_transfer: Option<TransferNotifier>,
   current_timestamp: Arc<AtomicUsize>,
 }
 
@@ -174,7 +175,17 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
     let keepalive_interval_between_flows = KEEPALIVE_INTERVAL / self.sockets.len().try_into().unwrap();
     let mut next_keepalive = Instant::now() + keepalive_interval_between_flows;
     let mut keepalive_index = 0usize;
-    let mut next_closing_samples = Instant::now() + CLOSING_SAMPLES_INTERVAL;
+    let closing_samples_interval = self
+      .on_transfer
+      .as_ref()
+      .map(|transfer| {
+        Duration::from_nanos(
+          // TODO: /2 is a HACK
+          (transfer.max_interval_samples as u64 * 1_000_000_000u64 / self.sample_rate as u64) / 2,
+        )
+      })
+      .unwrap_or(CLOSING_SAMPLES_INTERVAL);
+    let mut next_closing_samples = Instant::now() + closing_samples_interval;
     let mut events = mio::Events::with_capacity(MAX_FLOWS + 1); // +1 because of waker, TODO: really necessary?
     let mut may_have_command = false;
     let mut start_timestamp = None;
@@ -183,8 +194,8 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
     loop {
       let write_to_rbs =
         self.sockets.iter().find(|opt| opt.is_some()).is_some() || self.silence_writers.len() > 0;
-      let timeout = if may_have_command || write_to_rbs {
-        Some(CLOSING_SAMPLES_INTERVAL)
+      let timeout = if may_have_command || write_to_rbs || self.on_transfer.is_some() {
+        Some(closing_samples_interval)
       } else {
         self.current_timestamp.store(usize::MAX, Ordering::Release);
         None
@@ -247,9 +258,9 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           }
         }
       }
-      if start_time_rx.is_none() {
-        self.on_transfer.as_ref().map(|cb| cb());
-      }
+      //if start_time_rx.is_none() {
+      self.on_transfer.as_ref().map(|transfer| (transfer.callback)());
+      //} XXX
 
       if may_have_command {
         match self.commands_receiver.try_recv() {
@@ -402,9 +413,9 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           self.current_timestamp.store(usize::MAX, Ordering::Release);
         }
 
-        next_closing_samples += CLOSING_SAMPLES_INTERVAL;
+        next_closing_samples += closing_samples_interval;
         if next_closing_samples <= now {
-          next_closing_samples = now + CLOSING_SAMPLES_INTERVAL;
+          next_closing_samples = now + closing_samples_interval;
         }
       }
 
@@ -457,7 +468,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     ref_instant: Instant,
     clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
-    on_transfer: Option<Box<dyn Fn() + Send>>,
+    on_transfer: Option<TransferNotifier>,
     current_timestamp: Arc<AtomicUsize>,
     max_channels: usize,
   ) {
@@ -481,7 +492,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     ref_instant: Instant,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
     current_timestamp: Arc<AtomicUsize>,
-    on_transfer: Option<Box<dyn Fn() + Send>>,
+    on_transfer: Option<TransferNotifier>,
   ) -> (Self, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(100);
     let poll = mio::Poll::new().unwrap();

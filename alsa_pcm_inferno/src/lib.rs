@@ -3,18 +3,16 @@ extern crate libc;
 use alsa_sys_all::*;
 
 use futures_util::FutureExt;
-use inferno_aoip::utils::run_future_in_new_thread;
-use inferno_aoip::device_server::{
-    AtomicSample, Clock, DeviceServer, ExternalBufferParameters,
-    MediaClock, RealTimeClockReceiver, Sample, Settings,
-};
 use inferno_aoip::device_info::DeviceId;
+use inferno_aoip::device_server::{
+    AtomicSample, Clock, DeviceServer, ExternalBufferParameters, MediaClock, RealTimeClockReceiver,
+    Sample, Settings, TransferNotifier,
+};
+use inferno_aoip::utils::run_future_in_new_thread;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use libc::{
-    c_char, c_int, c_void, eventfd, EFD_CLOEXEC, EPIPE, POLLIN,
-};
-use log::{debug, error};
+use libc::{c_char, c_int, c_void, eventfd, EFD_CLOEXEC, EFD_NONBLOCK, EPIPE, POLLIN, POLLOUT};
+use log::{debug, error, warn};
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::mem::zeroed;
@@ -22,7 +20,7 @@ use std::num::Wrapping;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 struct StartArgs {
@@ -30,7 +28,7 @@ struct StartArgs {
     start_time_rx: oneshot::Receiver<Clock>,
     clock_rx_tx: oneshot::Sender<RealTimeClockReceiver>,
     current_timestamp: Arc<AtomicUsize>,
-    on_transfer: Box<dyn Fn() + Send + Sync + 'static>,
+    on_transfer: Option<TransferNotifier>,
 }
 
 enum Command {
@@ -96,7 +94,7 @@ fn get_or_create_instance(settings: &Settings) -> Arc<Mutex<InfernoInstance>> {
                                             on_transfer,
                                         )
                                         .await;
-                                    println!("started receiver");
+                                    debug!("started receiver");
                                 }
                                 Command::StartTransmitter(StartArgs {
                                     channels,
@@ -114,15 +112,15 @@ fn get_or_create_instance(settings: &Settings) -> Arc<Mutex<InfernoInstance>> {
                                             on_transfer,
                                         )
                                         .await;
-                                    println!("started transmitter");
+                                    debug!("started transmitter");
                                 }
                                 Command::StopReceiver => {
                                     device_server.stop_receiver().await;
-                                    println!("stopped receiver");
+                                    debug!("stopped receiver");
                                 }
                                 Command::StopTransmitter => {
                                     device_server.stop_transmitter().await;
-                                    println!("stopped transmitter");
+                                    debug!("stopped transmitter");
                                 }
                                 Command::Shutdown => {
                                     break;
@@ -176,7 +174,7 @@ struct MyIOPlug {
     start_time_tx: Option<oneshot::Sender<Clock>>,
     current_timestamp: Arc<AtomicUsize>,
     on_transfer_eventfd: libc::c_int,
-    on_transfer: Box<dyn Fn() + Send + Sync>,
+    on_transfer_enabled: bool,
     last_transfer_buffer_offset: snd_pcm_uframes_t,
     transfer_offset_add: Wrapping<Clock>,
     // TODO refactor multiple Options to single Option<struct>
@@ -211,7 +209,7 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         }
         let now_samples_opt = this.media_clock.now_in_timebase((*io).rate as u64);
         if now_samples_opt.is_some() && this.start_time.is_none() {
-            println!("warning: setting start_time in plugin_pointer, not plugin_start");
+            /*warn!("warning: setting start_time in plugin_pointer, not plugin_start");
             this.start_time = Some(now_samples_opt.unwrap() as usize);
             if let Some(start_time_tx) = this.start_time_tx.take() {
                 if let Err(e) = start_time_tx.send(now_samples_opt.unwrap()) {
@@ -219,7 +217,8 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
                 }
             } else {
                 error!("failed to send start timestamp: start_time_tx already used, BUG");
-            }
+            }*/
+            warn!("looks like app is calling plugin_pointer before clock is valid, returning 0");
         }
         if now_samples_opt.is_some() && this.start_time.is_some() {
             (now_samples_opt.unwrap() as usize).wrapping_sub(this.start_time.unwrap())
@@ -270,9 +269,9 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         if let Ok(hw_ptr) = ptr.try_into() {
             let ioplug_avail = snd_pcm_ioplug_avail(io, hw_ptr, (*io).appl_ptr);
             let ioplug_hw_avail = snd_pcm_ioplug_hw_avail(io, hw_ptr, (*io).appl_ptr);
-            println!("XRUN: buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}, hw_ptr {hw_ptr}, appl_ptr {}", (*io).appl_ptr);
+            warn!("XRUN: buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}, hw_ptr {hw_ptr}, appl_ptr {}", (*io).appl_ptr);
         } else {
-            println!("severe clock discontinuity");
+            warn!("severe clock discontinuity");
             return (-EPIPE).try_into().unwrap(); // report xrun
         }
 
@@ -302,7 +301,7 @@ fn get_app_name() -> Option<String> {
 }
 
 unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
-    println!("plugin_prepare called");
+    debug!("plugin_prepare called");
 
     let this = get_private(io);
 
@@ -328,12 +327,12 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
             return -libc::EINVAL;
         }
     }
-    println!("period size: {}", (*io).period_size);
+    debug!("period size: {}", (*io).period_size);
 
     let channels_buffers = channels_areas
         .iter()
         .enumerate()
-        .map(|(ch_index, area)| {
+        .map(|(_ch_index, area)| {
             ExternalBufferParameters::<Sample>::new(
                 area.addr.byte_offset((area.first / 8) as isize) as *const AtomicSample,
                 ((*io).buffer_size as usize) * channels_areas.len()
@@ -362,7 +361,7 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     };
     snd_pcm_sw_params_free(swparams);
     assert!(boundary != 0);
-    println!("boundary: {boundary}");
+    debug!("boundary: {boundary}");
     this.stream_info = Some(StreamInfo {
         boundary,
         boundary_add: Wrapping(0),
@@ -386,7 +385,17 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
             } else {
                 Default::default()
             },
-            on_transfer: Box::new(this.on_transfer.as_ref()),
+            on_transfer: if this.on_transfer_enabled {
+                let efd = this.on_transfer_eventfd;
+                Some(TransferNotifier {
+                    callback: Box::new(move || {
+                        libc::write(efd, [1u64].as_ptr() as *const c_void, 8);
+                    }),
+                    max_interval_samples: (*io).period_size.try_into().unwrap(),
+                })
+            } else {
+                None
+            },
         };
         let mut err = false;
         match (*io).stream {
@@ -430,14 +439,27 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     this.clock_receiver = match clock_rx_rx.blocking_recv() {
         Ok(clk) => Some(clk),
         Err(_) => {
-            error!("no clocks available");
+            error!("no clock available (couldn't receive clock receiver)");
             return -libc::EINVAL;
         }
     };
     this.start_time_tx = Some(start_time_tx);
     if let Some(clock_receiver) = &mut this.clock_receiver {
-        if let Some(overlay) = clock_receiver.get() {
-            this.media_clock.update_overlay(*overlay);
+        let mut ctr = 0;
+        loop {
+            clock_receiver.update();
+            if let Some(overlay) = clock_receiver.get() {
+                this.media_clock.update_overlay(*overlay);
+            }
+            if this.media_clock.is_ready() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            ctr += 1;
+            if ctr >= 20 {
+                error!("no clock available (timeout waiting for overlay update)");
+                return -libc::ETIMEDOUT;
+            }
         }
     }
     *this.buffers_valid.write().unwrap() = true;
@@ -446,13 +468,16 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
 }
 
 unsafe extern "C" fn plugin_start(io: *mut snd_pcm_ioplug_t) -> c_int {
-    println!("plugin_start called");
+    debug!("plugin_start called");
     let this = get_private(io);
     if let Some(clock_receiver) = &mut this.clock_receiver {
-        if clock_receiver.update() {
-            if let Some(overlay) = clock_receiver.get() {
-                this.media_clock.update_overlay(*overlay);
-            }
+        clock_receiver.update();
+        debug!("clock_receiver updated");
+        if let Some(overlay) = clock_receiver.get() {
+            this.media_clock.update_overlay(*overlay);
+            debug!("media_clock overlay updated");
+        } else {
+            warn!("no overlay for media_clock");
         }
     }
     let now_samples_opt = this.media_clock.now_in_timebase((*io).rate as u64);
@@ -466,12 +491,24 @@ unsafe extern "C" fn plugin_start(io: *mut snd_pcm_ioplug_t) -> c_int {
         {
             error!("failed to send start timestamp: {e}. tx/rx will not work.");
         }
+    } else {
+        warn!(
+            "can't set start_time in plugin_start: now_samples_opt: {:?}, start_time: {:?}",
+            now_samples_opt, this.start_time
+        );
+    }
+    if (*io).stream == SND_PCM_STREAM_PLAYBACK && this.on_transfer_enabled {
+        libc::write(
+            this.on_transfer_eventfd,
+            [1u64].as_ptr() as *const c_void,
+            8,
+        );
     }
     0
 }
 
 unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
-    println!("plugin_stop called");
+    debug!("plugin_stop called");
 
     let this = get_private(io);
     *this.buffers_valid.write().unwrap() = false;
@@ -488,7 +525,7 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
                         .unwrap();
                     common.capturing = false;
                 } else {
-                    println!("plugin_stop called more than once for capture stream");
+                    warn!("plugin_stop called more than once for capture stream");
                 }
             }
             SND_PCM_STREAM_PLAYBACK => {
@@ -499,7 +536,7 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
                         .unwrap();
                     common.playing = false;
                 } else {
-                    println!("plugin_stop called more than once for playback stream");
+                    warn!("plugin_stop called more than once for playback stream");
                 }
             }
             _ => {
@@ -516,18 +553,52 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
     0
 }
 
-unsafe extern "C" fn plugin_capture_transfer(
+unsafe extern "C" fn plugin_demangle_revents(
+    io: *mut snd_pcm_ioplug_t,
+    pfd: *mut libc::pollfd,
+    nfds: ::std::os::raw::c_uint,
+    revents: *mut ::std::os::raw::c_ushort,
+) -> ::std::os::raw::c_int {
+    if pfd.is_null() || nfds < 1 || revents.is_null() {
+        return -libc::EINVAL;
+    }
+    let got_events = (*pfd).revents;
+    if (*pfd).fd == (*io).poll_fd {
+        let mut out_events = got_events & !(POLLIN | POLLOUT);
+        if (got_events & POLLIN) != 0 {
+            out_events |= match (*io).stream {
+                SND_PCM_STREAM_PLAYBACK => POLLOUT,
+                SND_PCM_STREAM_CAPTURE => POLLIN,
+                _ => return -libc::EINVAL,
+            };
+            let mut blackhole: [u64; 1] = [0];
+            libc::read((*pfd).fd, blackhole.as_mut_ptr() as *mut c_void, 8);
+        }
+        *revents = out_events as _;
+    } else {
+        *revents = got_events as _;
+    }
+    0
+}
+
+unsafe extern "C" fn plugin_transfer(
     io: *mut snd_pcm_ioplug_t,
     areas: *const snd_pcm_channel_area_t,
     offset: snd_pcm_uframes_t,
     size: snd_pcm_uframes_t,
 ) -> snd_pcm_sframes_t {
-    //println!("plugin_transfer called, size: {:?}", size);
+    let this = get_private(io);
+    let mut blackhole: [u64; 1] = [0];
+    libc::read(
+        this.on_transfer_eventfd,
+        blackhole.as_mut_ptr() as *mut c_void,
+        8,
+    );
     size as snd_pcm_sframes_t
 }
 
 unsafe extern "C" fn plugin_close(io: *mut snd_pcm_ioplug_t) -> c_int {
-    println!("plugin_close called");
+    debug!("plugin_close called");
     let this = get_private(io);
     {
         let mut instances_locked = global_instances.write().unwrap();
@@ -588,7 +659,7 @@ unsafe extern "C" fn plugin_define(
         pos = snd_config_iterator_next(pos);
     }
 
-    let efd = eventfd(0, EFD_CLOEXEC);
+    let efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 
     let callbacks = snd_pcm_ioplug_callback_t {
         prepare: Some(plugin_prepare),
@@ -596,11 +667,10 @@ unsafe extern "C" fn plugin_define(
         stop: Some(plugin_stop),
         pointer: Some(plugin_pointer),
         close: Some(plugin_close),
+        poll_revents: Some(plugin_demangle_revents),
+        //transfer: Some(plugin_transfer),
         ..zeroed()
     };
-    if stream == SND_PCM_STREAM_CAPTURE {
-        //callbacks.transfer = Some(plugin_capture_transfer); // TODO
-    }
 
     let app_name = get_app_name().unwrap_or(format!("process {}", std::process::id().to_string()));
     let settings = Settings::new(&app_name, &app_name, None, &config);
@@ -609,13 +679,6 @@ unsafe extern "C" fn plugin_define(
         .get("DISABLE_POLLFD")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let on_transfer: Box<dyn Fn() + Send + Sync + 'static> = if disable_pollfd {
-        Box::new(move || {})
-    } else {
-        Box::new(move || {
-            libc::write(efd, [1u64].as_ptr() as *const c_void, 8);
-        })
-    };
 
     let use_flows_clock = config
         .get("USE_FLOWS_CLOCK")
@@ -636,7 +699,7 @@ unsafe extern "C" fn plugin_define(
         start_time_tx: None,
         current_timestamp: Arc::new(AtomicUsize::new(usize::MAX)),
         on_transfer_eventfd: efd,
-        on_transfer,
+        on_transfer_enabled: !disable_pollfd,
         last_transfer_buffer_offset: 0,
         transfer_offset_add: Wrapping(0),
     }));
@@ -787,7 +850,7 @@ unsafe extern "C" fn plugin_define(
 
     *pcmp = (*myio).io.pcm;
 
-    println!("plugin_define end");
+    debug!("plugin_define end");
     0
 }
 

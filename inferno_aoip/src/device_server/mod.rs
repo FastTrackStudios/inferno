@@ -2,9 +2,7 @@ use crate::mdns_client::{MdnsClient, PointerToMulticast};
 use crate::media_clock::{
   async_clock_receiver_to_realtime, make_shared_media_clock, start_clock_receiver, ClockReceiver,
 };
-use crate::ring_buffer::{
-  self, OwnedBuffer, ProxyToBuffer, ProxyToSamplesBuffer, RBOutput,
-};
+use crate::ring_buffer::{self, OwnedBuffer, ProxyToBuffer, ProxyToSamplesBuffer, RBOutput};
 use crate::state_storage::StateStorage;
 use atomic::Atomic;
 use flows_tx::FlowsTransmitter;
@@ -23,19 +21,18 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast as broadcast_queue, mpsc, watch, Mutex};
 
-use crate::device_info::DeviceInfo;
 use crate::common::*;
-
+use crate::device_info::DeviceInfo;
 
 pub(crate) mod arc_server;
 pub(crate) mod cmc_server;
-pub(crate) mod info_mcast_server;
 pub(crate) mod flows_control_server;
+pub(crate) mod info_mcast_server;
 pub(crate) mod mdns_server;
 
 pub(crate) mod channels_subscriber;
-pub(crate) mod flows_tx;
 pub(crate) mod flows_rx;
+pub(crate) mod flows_tx;
 mod peaks;
 pub(crate) mod samples_collector;
 pub(crate) mod samples_utils;
@@ -43,22 +40,23 @@ pub(crate) mod saved_settings;
 pub(crate) mod settings;
 pub(crate) mod tx_multicasts;
 
-
 pub use crate::common::{Clock, ClockDiff, Sample};
 pub use crate::media_clock::{MediaClock, RealTimeClockReceiver};
 pub use crate::ring_buffer::{ExternalBufferParameters, PositionReportDestination};
 pub use settings::Settings;
 pub type AtomicSample = atomic::Atomic<Sample>;
 
-use channels_subscriber::{
-  ChannelsBuffering, ChannelsSubscriber, ExternalBuffering, OwnedBuffering,
-};
-use samples_collector::{RealTimeSamplesReceiver, SamplesCallback, SamplesCollector};
+use channels_subscriber::{ChannelsBuffering, ChannelsSubscriber, ExternalBuffering, OwnedBuffering};
 use peaks::peaks_of_buffers;
-
+use samples_collector::{RealTimeSamplesReceiver, SamplesCallback, SamplesCollector};
 
 const PEAKS_BUFFER_LEN: usize = 24000;
 const PEAKS_ITER_SLEEP: Duration = Duration::from_millis(100);
+
+pub struct TransferNotifier {
+  pub callback: Box<dyn Fn() + Send + Sync>,
+  pub max_interval_samples: Clock,
+}
 
 pub struct DeviceServer {
   pub self_info: Arc<DeviceInfo>,
@@ -91,7 +89,10 @@ impl DeviceServer {
     let shdn_recv2 = shutdown_send.subscribe();
     let shdn_recv3 = shutdown_send.subscribe();
     let tx_multicasts_by_channel: Arc<RwLock<BTreeMap<usize, PointerToMulticast>>> = Default::default();
-    let mdns_handle = Arc::new(mdns_server::DeviceMDNSResponder::start(self_info.clone(), tx_multicasts_by_channel.clone()));
+    let mdns_handle = Arc::new(mdns_server::DeviceMDNSResponder::start(
+      self_info.clone(),
+      tx_multicasts_by_channel.clone(),
+    ));
 
     let mdns_client = Arc::new(crate::mdns_client::MdnsClient::new(self_info.clone()));
     let (mcast_tx, mcast_rx) = mpsc::channel(100);
@@ -198,12 +199,12 @@ impl DeviceServer {
     rx_channels_buffers: Vec<ExternalBufferParameters<Sample>>,
     start_time_rx: tokio::sync::oneshot::Receiver<Clock>,
     current_timestamp: Arc<AtomicUsize>,
-    on_transfer: Box<dyn Fn() + Send>,
+    on_transfer: Option<TransferNotifier>,
   ) {
     let buffering = ExternalBuffering::new(rx_channels_buffers, 4800 /*TODO*/);
     let rbs = buffering.ring_buffers.clone();
     *self.rx_peaks_supplier.write().unwrap() = Box::new(move || peaks_of_buffers(&rbs));
-    self.receive(vec![], Some(start_time_rx), buffering, current_timestamp, Some(on_transfer)).await;
+    self.receive(vec![], Some(start_time_rx), buffering, current_timestamp, on_transfer).await;
   }
   async fn receive<
     P: ProxyToSamplesBuffer + Send + Sync + 'static,
@@ -214,7 +215,7 @@ impl DeviceServer {
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
     channels_buffering: B,
     current_timestamp: Arc<AtomicUsize>,
-    on_transfer: Option<Box<dyn Fn() + Send>>,
+    on_transfer: Option<TransferNotifier>,
   ) {
     let (srx1, srx2) = if let Some(in_rx) = start_time_rx {
       let (stx1, srx1) = tokio::sync::oneshot::channel::<Clock>();
@@ -245,7 +246,7 @@ impl DeviceServer {
       self.mdns_client.clone(),
       self.mcast_tx.clone(),
       channels_buffering,
-      self.tx_latency_ns /* FIXME should be RX latency */,
+      self.tx_latency_ns, /* FIXME should be RX latency */
       self.state_storage.clone(),
       srx2,
       self.ref_instant,
@@ -277,27 +278,27 @@ impl DeviceServer {
     tx_channels_buffers: Vec<ExternalBufferParameters<Sample>>,
     start_time_rx: tokio::sync::oneshot::Receiver<Clock>,
     current_timestamp: Arc<AtomicUsize>,
-    on_transfer: Box<dyn Fn() + Send>,
+    on_transfer: Option<TransferNotifier>,
   ) {
     let rb_outputs: Vec<_> =
       tx_channels_buffers.iter().map(|par| ring_buffer::wrap_external_source(par, 0)).collect();
     let rbs = rb_outputs.iter().map(|rbo| rbo.shared().clone()).collect_vec();
     *self.tx_peaks_supplier.write().unwrap() = Box::new(move || peaks_of_buffers(&rbs));
-    self.transmit(Some(start_time_rx), rb_outputs, current_timestamp, Some(on_transfer)).await;
+    self.transmit(Some(start_time_rx), rb_outputs, current_timestamp, on_transfer).await;
   }
   async fn transmit<P: ProxyToSamplesBuffer + Send + Sync + 'static>(
     &mut self,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
     rb_outputs: Vec<RBOutput<Sample, P>>,
     current_timestamp: Arc<AtomicUsize>,
-    on_transfer: Option<Box<dyn Fn() + Send>>,
+    on_transfer: Option<TransferNotifier>,
   ) {
     let clock_rx = self.clock_receiver.subscribe();
 
     let (flows_tx_handle, flows_tx_thread) = flows_tx::FlowsTransmitter::start(
       self.self_info.clone(),
       self.tx_latency_ns.try_into().unwrap(),
-      clock_rx,
+      self.get_realtime_clock_receiver(),
       rb_outputs.clone(),
       start_time_rx,
       current_timestamp.clone(),
