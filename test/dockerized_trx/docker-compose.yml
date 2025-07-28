@@ -25,11 +25,11 @@ services:
       #control_and_test:
       #  condition: service_started
 
-  inferno1:
+  jack1:
     build: alpine_jack
     env_file: inferno.env
     environment:
-      - INFERNO_NAME=inferno1
+      - INFERNO_NAME=jack1
     networks:
       - audio_net
     volumes:
@@ -43,11 +43,47 @@ services:
       clock_source:
         condition: service_started
 
-  inferno2:
+  jack2:
     build: alpine_jack
     env_file: inferno.env
     environment:
-      - INFERNO_NAME=inferno2
+      - INFERNO_NAME=jack2
+    networks:
+      - audio_net
+    volumes:
+      - shared:/shared
+    ulimits:
+      memlock: 200000000
+    shm_size: 200m
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      clock_source:
+        condition: service_started
+
+  aplayrec1:
+    build: alpine_aplay_arecord
+    env_file: inferno.env
+    environment:
+      - INFERNO_NAME=aplayrec1
+    networks:
+      - audio_net
+    volumes:
+      - shared:/shared
+    ulimits:
+      memlock: 200000000
+    shm_size: 200m
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      clock_source:
+        condition: service_started
+
+  aplayrec2:
+    build: alpine_aplay_arecord
+    env_file: inferno.env
+    environment:
+      - INFERNO_NAME=aplayrec2
     networks:
       - audio_net
     volumes:
@@ -69,8 +105,10 @@ services:
     volumes:
       - shared:/shared
     depends_on:
-      - inferno1
-      - inferno2
+      - jack1
+      - jack2
+      - aplayrec1
+      - aplayrec2
 
 networks:
   audio_net:

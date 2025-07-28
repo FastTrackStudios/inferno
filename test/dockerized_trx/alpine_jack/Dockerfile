@@ -5,7 +5,7 @@ RUN git clone https://github.com/x42/jack-stdio
 WORKDIR /app/jack-stdio
 RUN make all
 
-FROM inferno_aoip:alpine
+FROM inferno_aoip:alpine-alsa
 RUN apk add jack
 
 RUN mkdir -p /app/jack-stdio

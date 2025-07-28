@@ -5,7 +5,7 @@ authors = ["Teo <teodly@lumifaza.org>"]
 license = "GPL-3.0-or-later OR AGPL-3.0-or-later"
 keywords = ["AoIP", "audio", "network", "dante", "audinate"]
 categories = ["multimedia::audio", "network-programming"]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -21,7 +21,7 @@ log = "0.4"
 atomic_enum = "0.2"
 local-ip-address = "0.5"
 atomic = "0.6"
-rand = { version="0.8", features=["small_rng"] }
+rand = { version = "0.8", features = ["small_rng"] }
 toml = "0.8"
 platform-dirs = "0.3"
 clock-steering = "0.2"
@@ -41,8 +41,8 @@ env_logger = "0.11.8"
 
 [dependencies.serde]
 version = "1.0.159"
-features = [ "derive" ]
+features = ["derive"]
 
 [dependencies.tokio]
 version = "1.36"
-features = [ "net", "time", "sync", "signal" ]
+features = ["net", "time", "sync", "signal"]

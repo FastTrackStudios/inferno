@@ -278,6 +278,12 @@ If you want to contribute but can't code or don't know where to start because th
 
 # Changelog
 
+## 0.5.0
+* works with JACK, should work with any app that uses the soundcard as an interrupt source
+* introduced automated integration test that launches 2 instances, streams audio data between them and checks for its correctness (including audio comparison). Currently tests only JACK with alsa_pcm_inferno. PipeWire, aplay, arecord, sox and Inferno2pipe are planned.
+* Dockerfile
+* fix logic error in CPU lockup prevention code
+
 ## 0.4.3
 * support monotonic clock as base with jump-preventing guard (Statime)
 * reduced snowball effect when CPU is overloaded, transmitter is lagging and tries to transmit multiple packets at once: max lag is set to `TX_LATENCY_NS`, and if transmit thread is locked for more than 5ms, 2ms sleep will be forced
@@ -338,7 +344,7 @@ At this point, Inferno will roughly become alternative to Dante Virtual Soundcar
 * read configuration from text files
 * ability to work as a clock source (PTPv1 leader) - Statime
   * it is already possible if you use PTPv2 - in theory you should be able to make Inferno-only AoIP network - not tested yet
-* automated integration test that will launch several instances, stream audio data between them and check for its correctness
+* add more apps and Linux distributions to the integration test
 * bit-perfect transmitter (currently 32-bit integers are always used internally and conversion to 24-bit or 16-bit adds dither)
 * command line helper / TUI / GUI
 * installer script, with cross compilation support

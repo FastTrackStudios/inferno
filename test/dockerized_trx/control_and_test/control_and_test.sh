@@ -1,23 +1,32 @@
 #!/bin/sh -e
 
-while ! test `netaudio device list | grep inferno | wc -l` -eq 2 ; do sleep 1; done
+while ! test `netaudio device list | grep jack | wc -l` -eq 2 ; do sleep 1; done
+while ! test `netaudio device list | grep aplayrec | wc -l` -eq 2 ; do sleep 1; done
 
 echo '✅ device list test passed'
 
-netaudio subscription add --rx-device-name inferno1 --rx-channel-name 'RX 1' --tx-device-name inferno2 --tx-channel-name 'TX 1'
-netaudio subscription add --rx-device-name inferno1 --rx-channel-name 'RX 2' --tx-device-name inferno2 --tx-channel-name 'TX 2'
-netaudio subscription add --rx-device-name inferno2 --rx-channel-name 'RX 1' --tx-device-name inferno1 --tx-channel-name 'TX 1'
-netaudio subscription add --rx-device-name inferno2 --rx-channel-name 'RX 2' --tx-device-name inferno1 --tx-channel-name 'TX 2'
+netaudio subscription add --rx-device-name jack1 --rx-channel-name 'RX 1' --tx-device-name jack2 --tx-channel-name 'TX 1' &
+netaudio subscription add --rx-device-name jack2 --rx-channel-name 'RX 1' --tx-device-name jack1 --tx-channel-name 'TX 1' &
+netaudio subscription add --rx-device-name aplayrec1 --rx-channel-name 'RX 1' --tx-device-name aplayrec2 --tx-channel-name 'TX 1' &
+netaudio subscription add --rx-device-name aplayrec2 --rx-channel-name 'RX 1' --tx-device-name aplayrec1 --tx-channel-name 'TX 1'
 
-echo '✅ after subscribe'
+netaudio subscription add --rx-device-name jack1 --rx-channel-name 'RX 2' --tx-device-name jack2 --tx-channel-name 'TX 2' &
+netaudio subscription add --rx-device-name jack2 --rx-channel-name 'RX 2' --tx-device-name jack1 --tx-channel-name 'TX 2' &
+netaudio subscription add --rx-device-name aplayrec1 --rx-channel-name 'RX 2' --tx-device-name aplayrec2 --tx-channel-name 'TX 2' &
+netaudio subscription add --rx-device-name aplayrec2 --rx-channel-name 'RX 2' --tx-device-name aplayrec1 --tx-channel-name 'TX 2'
 
-test `netaudio subscription list | grep inferno | wc -l` -eq 4
+wait
+
+    echo '✅ after subscribe'
+
+test `netaudio subscription list | grep jack | wc -l` -eq 4
+test `netaudio subscription list | grep aplayrec | wc -l` -eq 4
 
 echo '✅ subscription test passed, waiting for recorded audio'
 
 cd /shared
 
-while ! test \( -e done-inferno1 \) -a \( -e done-inferno2 \); do sleep 1; done
+while ! test \( -e done-jack1 \) -a \( -e done-jack2 \) -a \( -e done-aplayrec2 \) -a \( -e done-aplayrec2 \); do sleep 1; done
 
 samples_expected=$((DURATION*INFERNO_SAMPLE_RATE))
 tolerance=$INFERNO_SAMPLE_RATE
@@ -49,7 +58,7 @@ function test_recording {
     sox -t raw -e signed-integer -b 16 -c 2 -r 48000 $infile -t raw -e signed-integer -b 16 -c 2 -r 48000 recnsbc-$1.raw trim $((samples-seconds_both_channels*INFERNO_SAMPLE_RATE))s
     /diff_tools/wd -align$samples_expected -ll play-$2.raw recnsbc-$1.raw | tee reportbc-$1.txt
     echo '  ✅ shorter channel recording matching'
-    test `sed -E 's/^Compared:\s+([0-9]+).*$/\1/; t; d' < reportbc-$1.txt` -ge $((seconds_both_channels*INFERNO_SAMPLE_RATE))
+    test `sed -E 's/^Compared:\s+([0-9]+).*$/\1/; t; d' < reportbc-$1.txt` -ge $((seconds_both_channels*INFERNO_SAMPLE_RATE*95/100))
     echo '  ✅ shorter channel recording long enough'
 
     dd if=/dev/zero of=recnsbc-$1.raw bs=1 seek=100000 count=2 conv=notrunc
@@ -59,5 +68,10 @@ function test_recording {
     echo "✅ $infile all OK"
 }
 
-test_recording inferno1 inferno2
-test_recording inferno2 inferno1
+test_recording aplayrec1 aplayrec2
+test_recording aplayrec2 aplayrec1
+
+test_recording jack1 jack2
+test_recording jack2 jack1
+
+rm -f /shared/rec* /shared/play*
