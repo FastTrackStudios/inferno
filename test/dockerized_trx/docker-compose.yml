@@ -97,6 +97,24 @@ services:
       clock_source:
         condition: service_started
 
+  pipewire1:
+    build: fedora_pipewire
+    env_file: inferno.env
+    environment:
+      - INFERNO_NAME=pipewire1
+    networks:
+      - audio_net
+    volumes:
+      - shared:/shared
+    ulimits:
+      memlock: 200000000
+    shm_size: 200m
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      clock_source:
+        condition: service_started
+
   control_and_test:
     build: control_and_test
     env_file: inferno.env
