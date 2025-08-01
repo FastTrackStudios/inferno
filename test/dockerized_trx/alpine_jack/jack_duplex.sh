@@ -8,7 +8,7 @@ export TMPDIR=/shared/tmp-$INFERNO_NAME
 rm -rf $HOME/.local/state/inferno_aoip || true
 head -c$((INFERNO_SAMPLE_RATE * 2 * 2 * DURATION)) < /dev/urandom > /shared/play-$INFERNO_NAME.raw
 
-/usr/bin/jackd --no-mlock --no-realtime -dalsa -dinferno -r$INFERNO_SAMPLE_RATE -p1024 -n3 &
+/usr/bin/jackd -dalsa -dinferno -r$INFERNO_SAMPLE_RATE -p1024 -n3 &
 sleep 2
 
 /app/jack-stdin --duration $DURATION system:playback_1 system:playback_2 < /shared/play-$INFERNO_NAME.raw &

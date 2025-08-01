@@ -115,6 +115,21 @@ services:
       clock_source:
         condition: service_started
 
+  i2pipe1:
+    build: alpine_i2pipe
+    env_file: inferno.env
+    environment:
+      - INFERNO_NAME=i2pipe1
+    networks:
+      - audio_net
+    volumes:
+      - shared:/shared
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      clock_source:
+        condition: service_started
+
   control_and_test:
     build: control_and_test
     env_file: inferno.env

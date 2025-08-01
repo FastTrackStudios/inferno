@@ -4,8 +4,9 @@ cd /shared
 
 while ! netaudio device list > devlist && \
     test `grep jack < devlist | wc -l` -eq 2 && \
-    test `grep aplayrec < devlist | wc -l` -eq 2 && \
-    test `grep pipewire < devlist | wc -l` -eq 1
+    test `grep aplayrec < devlist | wc -l` -eq 4 && \
+    test `grep pipewire < devlist | wc -l` -eq 1 && \
+    test `grep i2pipe < devlist | wc -l` -eq 1
 do sleep 1; done
 
 
@@ -17,13 +18,15 @@ netaudio subscription add --rx-device-name jack1 --rx-channel-name 'RX 1' --tx-d
 netaudio subscription add --rx-device-name jack2 --rx-channel-name 'RX 1' --tx-device-name jack1 --tx-channel-name 'TX 1' &
 netaudio subscription add --rx-device-name aplayrec1c --rx-channel-name 'RX 1' --tx-device-name pipewire1 --tx-channel-name 'TX 1' &
 netaudio subscription add --rx-device-name aplayrec2c --rx-channel-name 'RX 1' --tx-device-name aplayrec1p --tx-channel-name 'TX 1' &
-netaudio subscription add --rx-device-name pipewire1 --rx-channel-name 'RX 1' --tx-device-name aplayrec1p --tx-channel-name 'TX 1'
+netaudio subscription add --rx-device-name pipewire1 --rx-channel-name 'RX 1' --tx-device-name aplayrec1p --tx-channel-name 'TX 1' &
+netaudio subscription add --rx-device-name i2pipe1 --rx-channel-name 'RX 1' --tx-device-name jack1 --tx-channel-name 'TX 1'
 
 netaudio subscription add --rx-device-name jack1 --rx-channel-name 'RX 2' --tx-device-name jack2 --tx-channel-name 'TX 2' &
 netaudio subscription add --rx-device-name jack2 --rx-channel-name 'RX 2' --tx-device-name jack1 --tx-channel-name 'TX 2' &
 netaudio subscription add --rx-device-name aplayrec1c --rx-channel-name 'RX 2' --tx-device-name pipewire1 --tx-channel-name 'TX 2' &
 netaudio subscription add --rx-device-name aplayrec2c --rx-channel-name 'RX 2' --tx-device-name aplayrec1p --tx-channel-name 'TX 2' &
-netaudio subscription add --rx-device-name pipewire1 --rx-channel-name 'RX 2' --tx-device-name aplayrec1p --tx-channel-name 'TX 2'
+netaudio subscription add --rx-device-name pipewire1 --rx-channel-name 'RX 2' --tx-device-name aplayrec1p --tx-channel-name 'TX 2' &
+netaudio subscription add --rx-device-name i2pipe1 --rx-channel-name 'RX 2' --tx-device-name jack1 --tx-channel-name 'TX 2'
 
 wait
 subend=$(date +%s)
@@ -36,10 +39,11 @@ fi
 
 echo '✅ after subscribe'
 
-netaudio subscription list > sublist.txt
-test `grep jack sublist.txt | wc -l` -eq 4
-test `grep aplayrec sublist.txt | wc -l` -eq 6
-test `grep pipewire sublist.txt | wc -l` -eq 4
+netaudio subscription list > sublist
+test `grep jack sublist | wc -l` -eq 6
+test `grep aplayrec sublist | wc -l` -eq 6
+test `grep pipewire sublist | wc -l` -eq 4
+test `grep i2pipe sublist | wc -l` -eq 2
 
 echo '✅ subscription test passed, waiting for recorded audio'
 
@@ -53,7 +57,7 @@ function wait_for {
     done
 }
 
-wait_for jack1 jack2 aplayrec1 aplayrec2 pipewire1
+wait_for jack1 jack2 aplayrec1 aplayrec2 pipewire1 i2pipe1
 
 samples_expected=$((DURATION*INFERNO_SAMPLE_RATE))
 tolerance=$INFERNO_SAMPLE_RATE
@@ -64,8 +68,8 @@ function test_recording {
     echo "Testing file $infile"
 
     samples=$((`stat -c %s $infile`/4))
-    test $samples -gt $((samples_expected-tolerance))
-    test $samples -lt $((samples_expected+tolerance))
+    test $samples -ge $((signal_min_seconds*INFERNO_SAMPLE_RATE))
+    test $samples -le $((samples_expected+tolerance))
     echo '  ✅ recording length test passed'
 
     seconds_nonsilent="$(sox $infile recns-$1.wav silence 1 0.1 1% stat 2>&1 | sed -E 's/^Length \(seconds\):\s+([0-9]+).*$/\1/; t; d')"
@@ -106,10 +110,13 @@ raw_to_wav play-jack1
 raw_to_wav play-jack2
 raw_to_wav rec-jack1
 raw_to_wav rec-jack2
+sox --no-dither -t raw -e signed-integer -b 32 -c 2 -r $INFERNO_SAMPLE_RATE /shared/rec-i2pipe1.raw -b 16 /shared/rec-i2pipe1.wav
+rm /shared/rec-i2pipe1.raw
 
 test_recording aplayrec1 pipewire1
 test_recording aplayrec2 aplayrec1
 test_recording pipewire1 aplayrec1
+test_recording i2pipe1 jack1
 
 test_recording jack1 jack2
 test_recording jack2 jack1

@@ -2,6 +2,7 @@ use clap::Parser;
 use log::{error, info};
 use std::io::Write;
 use std::{fs::File, mem::size_of};
+use tokio::sync::oneshot;
 
 use inferno_aoip::device_server::{DeviceServer, Sample, Settings};
 
@@ -46,6 +47,8 @@ async fn main() {
 
     let args = Args::parse();
     let ch_count = args.channels_count;
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let mut stop_tx = Some(stop_tx);
 
     let mut settings = Settings::new("Inferno2pipe", "Inferno2pipe", None, &Default::default());
     settings.make_rx_channels(ch_count);
@@ -68,13 +71,18 @@ async fn main() {
                 bi += stride;
             }
         }
-        output_file
-            .write_all(&buffer[..len])
-            .unwrap_or_else(|e| error!("error writing output: {e:?}"));
+        if let Err(e) = output_file.write_all(&buffer[..len]) {
+            error!("error writing output: {e:?}");
+            stop_tx.take().map(|tx| tx.send(()));
+        }
     };
 
     let mut server = DeviceServer::start(settings).await;
     server.receive_with_callback(Box::new(write_callback)).await;
-    let _ = tokio::signal::ctrl_c().await;
+
+    tokio::select! {
+        _ = stop_rx => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
     server.shutdown().await;
 }
