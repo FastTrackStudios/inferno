@@ -308,13 +308,9 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
               }
               let socket = self.sockets[socket_index].as_mut().unwrap();
 
-              let timestamp_shift = start_timestamp
-                .map(|start_ts| {
-                  (0 as ClockDiff)
-                    .wrapping_sub_unsigned(start_ts)
-                    .wrapping_add_unsigned(socket.latency_samples.try_into().unwrap())
-                })
-                .unwrap_or(0);
+              let timestamp_shift = (0 as ClockDiff)
+                .wrapping_sub_unsigned(start_timestamp.unwrap_or(0))
+                .wrapping_add_unsigned(socket.latency_samples.try_into().unwrap());
 
               // prefer existing sink - this ensures that buffer is erased properly but not excessively
               let sink = if let Some(existing_index) =
