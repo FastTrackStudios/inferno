@@ -376,9 +376,10 @@ And the following are limitations of AES67 implementation in Dante, not AES67 in
 
 # Other open source projects related to Dante
 * [network-audio-controller](https://github.com/chris-ritsen/network-audio-controller) - command line connection and device controller, alternative to Dante Controller
+* [companion-module-audinate-dantecontroller](https://github.com/bitfocus/companion-module-audinate-dantecontroller) - Bitfocus Companion module for controlling Dante devices
 * [inferno_runners](https://github.com/maze42d/inferno_runners) - scripts for running Inferno with PipeWire-based inter-soundcard bridge and [USB audio gadget](https://www.diyaudio.com/community/threads/linux-usb-audio-gadget-rpi4-otg.342070/)
 * [dante-aes67-relay.js](https://gist.github.com/philhartung/87d336a3c432e2ce5452befcad1b945f) - Relay a Dante multicast stream to AES67
-* [wycliffe](https://github.com/jsharkey/wycliffe), receiver implementation contained in a video control software
+* [wycliffe](https://github.com/jsharkey/wycliffe), receiver implementation contained in a video control software - the earliest public attempt of reverse engineering Dante
 * [List of AES67 audio resources](https://aes67.app/resources) at [AES67 Stream Monitor](https://aes67.app/) website (Dante is AES67-compatible but not on all devices and requires manual configuration)
 
 ## Alternatives

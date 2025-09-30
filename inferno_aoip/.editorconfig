@@ -5,3 +5,4 @@ insert_final_newline = true
 [**.rs]
 indent_style = space
 indent_size = 2
+tab_width = 2
