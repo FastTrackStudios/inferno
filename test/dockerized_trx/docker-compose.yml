@@ -44,7 +44,8 @@ services:
         condition: service_started
 
   jack2:
-    build: alpine_jack
+    build: debian_jack
+    platform: linux/386
     env_file: inferno.env
     environment:
       - INFERNO_NAME=jack2

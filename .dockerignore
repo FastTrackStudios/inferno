@@ -3,3 +3,6 @@ test
 .vscode
 bugs
 logs
+Dockerfile.*
+README.md
+*/README.md
