@@ -116,7 +116,9 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
 
           // TODO: optimize, fetching the hardware clock so often is suboptimal
           // fetch it every n packets or use timestamped_socket and kernel-level timestamps instead
-          if let Some(now) = clock.now_in_timebase(sample_rate.into()) {
+
+          // can be wrapping because used only for latency calculation
+          if let Some(now) = clock.wrapping_now_in_timebase(sample_rate.into()) {
             let latency = wrapped_diff(now, timestamp).clamp(0, i32::MAX as _);
             sd.actual_latency_samples.fetch_max(latency as _, Ordering::Relaxed);
           }
@@ -319,7 +321,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                 self.silence_writers.swap_remove(existing_index).sink
                 // TODO: previous sink is dropped. is freeing memory in realtime thread safe???
               } else {
-                if let Some(now) = self.clock.now_in_timebase(self.sample_rate.into()) {
+                if let Some(now) = self.clock.wrapping_now_in_timebase(self.sample_rate.into()) {
                   sink.shared().reset(now.wrapping_add_signed(timestamp_shift));
                 } else {
                   error!("clock not available, unable to reset ringbuffer when connecting channel");
@@ -349,7 +351,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                     ch.sinks.iter().position(|sink| Arc::ptr_eq(sink.shared(), &rb_shared));
                   if let Some(sink_index) = sink_index_opt {
                     let sink = ch.sinks.swap_remove(sink_index);
-                    if let Some(now) = self.clock.now_in_timebase(self.sample_rate.into()) {
+                    if let Some(now) = self.clock.wrapping_now_in_timebase(self.sample_rate.into()) {
                       let rb_size = sink.ring_buffer_size();
                       let writer = SilenceWriter {
                         sink,
@@ -379,7 +381,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
       let now = Instant::now();
 
       if start_time_rx.is_none() && now >= next_closing_samples {
-        if let Some(now_ts) = self.clock.now_in_timebase(self.sample_rate.into()) {
+        if let Some(now_ts) = self.clock.wrapping_now_in_timebase(self.sample_rate.into()) {
           let ts = now_ts.wrapping_sub(start_timestamp.unwrap_or(0));
 
           // Normally this position will be already written because in self.receive we are writing into future

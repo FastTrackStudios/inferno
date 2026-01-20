@@ -49,7 +49,7 @@ pub type SamplesRequestCallback = Box<dyn FnMut(Clock, usize, &mut [Sample]) + S
 struct Flow {
   socket: UdpSocket,
   channel_indices: Vec<Option<usize>>,
-  next_ts: Clock,
+  next_ts: LongClock,
   fpp: usize,
   bytes_per_sample: usize,
   expires: Option<Clock>,
@@ -57,9 +57,9 @@ struct Flow {
 }
 
 impl Flow {
-  fn bootstrap_next_ts(&mut self, now: Clock) {
-    let remainder = now % (self.fpp as Clock);
-    self.next_ts = now.wrapping_add(self.fpp as Clock - remainder);
+  fn bootstrap_next_ts(&mut self, now: LongClock) {
+    let remainder = now % (self.fpp as LongClock);
+    self.next_ts = now.wrapping_add(self.fpp as LongClock - remainder);
   }
   fn keep_alive(&mut self, now: Clock, sample_rate: u32) {
     self.expires.as_mut().map(|expires| {
@@ -98,7 +98,7 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
   clock: MediaClock,
   channels_sources: Vec<RBOutput<Sample, P>>,
   send_latency_samples: usize,
-  clock_offset_samples: ClockDiff,
+  clock_offset_samples: LongClockDiff,
   max_lag_samples: usize,
   timestamp_shift: ClockDiff,
   current_timestamp: Arc<AtomicUsize>,
@@ -107,12 +107,12 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
 }
 
 impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
-  fn now(&self) -> Option<Clock> {
+  fn now(&self) -> Option<LongClock> {
     self.clock.now_in_timebase(self.sample_rate as u64)
   }
 
   #[inline(always)]
-  fn transmit(&mut self, dither_rng: &mut SmallRng, now: Clock, process_events: bool) {
+  fn transmit(&mut self, dither_rng: &mut SmallRng, now: LongClock, process_events: bool) {
     let mut tmp_samples = [0 as Sample; FPP_MAX as usize];
     let mut pbuff = [0u8; MTU];
     let sample_rate = self.sample_rate;
@@ -126,7 +126,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       }
       let channels_in_flow = flow.channel_indices.len();
       let stride = channels_in_flow * flow.bytes_per_sample;
-      let lag = wrapped_diff(now, flow.next_ts);
+      let lag = wrapped_diff(now as Clock, flow.next_ts as Clock);
       if lag > max_lag_samples as ClockDiff {
         error!("tx lag of {} samples detected, or media clock jumped, dropout occurs!", lag);
         flow.bootstrap_next_ts(now);
@@ -136,14 +136,14 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         flow.bootstrap_next_ts(now);
       }
       pbuff[9..9 + stride * flow.fpp].fill(0);
-      while wrapped_diff(now, flow.next_ts) >= 0 {
+      while wrapped_diff(now as Clock, flow.next_ts as Clock) >= 0 {
         pbuff[0] = 2u8; // ???
         let packet_ts = flow.next_ts.wrapping_add_signed(self.clock_offset_samples) /* .wrapping_sub(flow.fpp) */; // ???
-        let seconds = packet_ts / (sample_rate as Clock);
-        let subsec_samples = packet_ts % (sample_rate as Clock);
+        let seconds = packet_ts / (sample_rate as LongClock);
+        let subsec_samples = packet_ts % (sample_rate as LongClock);
         pbuff[1..5].copy_from_slice(&(seconds as u32).to_be_bytes());
         pbuff[5..9].copy_from_slice(&(subsec_samples as u32).to_be_bytes());
-        let start_ts = flow.next_ts.wrapping_add_signed(self.timestamp_shift);
+        let start_ts = (flow.next_ts as Clock).wrapping_add_signed(self.timestamp_shift);
         for (index_in_flow, &ch_opt) in flow.channel_indices.iter().enumerate() {
           if let Some(ch_index) = ch_opt {
             //(self.callback)(flow.next_ts, ch_index, &mut tmp_samples[0..flow.fpp]);
@@ -187,8 +187,8 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         }
         iterations += 1;
         if (iterations % 16) == 0 {
-          if let Some(real_now) = self.clock.now_in_timebase(self.sample_rate as u64) {
-            let diff = wrapped_diff(real_now.try_into().unwrap(), now);
+          if let Some(real_now) = self.clock.wrapping_now_in_timebase(self.sample_rate as u64) {
+            let diff = wrapped_diff(real_now.try_into().unwrap(), now as Clock);
             if diff > max_awake_time_samples {
               warn!("blocked for {diff} samples, yielding to avoid CPU lockup");
               std::thread::sleep(Duration::from_micros(2000));
@@ -199,8 +199,8 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       }
       if process_events && flow.expires.is_some() {
         if let Ok(_) = flow.socket.recv(&mut pbuff) {
-          flow.keep_alive(now, sample_rate);
-        } else if wrapped_diff(flow.expires.unwrap(), now) < 0 {
+          flow.keep_alive(now as Clock, sample_rate);
+        } else if wrapped_diff(flow.expires.unwrap(), now as Clock) < 0 {
           flow.expired.store(true, Ordering::Release);
           info!("flow dst {:?} expired", flow.socket.peer_addr().ok());
         }
@@ -236,7 +236,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           let now = self.now().unwrap();
           for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
             flow.bootstrap_next_ts(now);
-            flow.keep_alive(now, self.sample_rate);
+            flow.keep_alive(now as Clock, self.sample_rate);
           }
         }
       }
@@ -248,8 +248,8 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         tokio::time::sleep(Duration::from_secs(1)).await;
       }
     };
-    let mut next_on_transfer = now;
-    let mut next_process_events = now;
+    let mut next_on_transfer = now as Clock;
+    let mut next_process_events = now as Clock;
     drop(now);
 
     set_current_thread_realtime(81);
@@ -259,14 +259,14 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         .iter()
         .filter_map(|opt| opt.as_ref())
         .filter(|flow| !flow.expired.load(Ordering::Relaxed))
-        .map(|&ref flow| flow.next_ts)
+        .map(|&ref flow| flow.next_ts as Clock)
         .min_by(|&a, &b| wrapped_diff(a, b).cmp(&0));
 
       let sleep_until =
         [min_next_ts, if self.on_transfer.is_some() { Some(next_on_transfer) } else { None }]
           .into_iter()
           .filter_map(|opt| opt)
-          .min_by(|&a, &b| wrapped_diff(a, b).cmp(&0));
+          .min_by(|&a, &b| wrapped_diff(a as Clock, b as Clock).cmp(&0));
 
       if self.clock_recv.update() {
         if let Some(ovl) = self.clock_recv.get() {
@@ -282,7 +282,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       };
 
       let sleep_duration = sleep_until
-        .and_then(|ts| self.clock.system_clock_duration_from_until(now, ts, sample_rate as u64)) // TODO: this may break on 32-bit systems
+        .and_then(|ts| self.clock.system_clock_duration_from_until(now as Clock, ts, sample_rate as u64))
         .unwrap_or(std::time::Duration::from_secs(20))
         .max(MIN_SLEEP);
 
@@ -300,10 +300,10 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           std::thread::sleep(sleep_duration);
         }
         if let Some(now) = self.now() {
-          let process_events = wrapped_diff(now, next_process_events) >= 0;
+          let process_events = wrapped_diff(now as Clock, next_process_events) >= 0;
           self.transmit(&mut dither_rng, now, process_events);
           if process_events {
-            next_process_events = now.wrapping_add(process_events_interval);
+            next_process_events = (now as Clock).wrapping_add(process_events_interval);
             self.commands_receiver.try_recv().unwrap_or(Command::NoOp)
           } else {
             Command::NoOp
@@ -336,16 +336,16 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       let now_opt = if self.on_transfer.is_some() { self.now() } else { None };
       if let Some(transfer) = self.on_transfer.as_ref() {
         if let Some(now) = now_opt {
-          if wrapped_diff(next_on_transfer, now) <= 0 {
+          if wrapped_diff(next_on_transfer, now as Clock) <= 0 {
             // TODO: /2 is a HACK
             next_on_transfer = next_on_transfer.wrapping_add(transfer.max_interval_samples / 2);
-            let diff = wrapped_diff(next_on_transfer, now);
+            let diff = wrapped_diff(next_on_transfer, now as Clock);
             if diff < 0 || diff > (transfer.max_interval_samples * 2).try_into().unwrap() {
               warn!("clock jumped, sanitizing next_on_transfer");
-              next_on_transfer = now.wrapping_add(transfer.max_interval_samples);
+              next_on_transfer = (now as Clock).wrapping_add(transfer.max_interval_samples);
             }
           } else {
-            next_on_transfer = now.wrapping_add(transfer.max_interval_samples);
+            next_on_transfer = (now as Clock).wrapping_add(transfer.max_interval_samples);
           }
         } else {
           error!(
@@ -379,7 +379,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           if let Some(now) = self.now() {
             flow.bootstrap_next_ts(now);
             if needs_keepalives {
-              flow.keep_alive(now, self.sample_rate);
+              flow.keep_alive(now as Clock, self.sample_rate);
             }
           }
           let previous = std::mem::replace(&mut self.flows[index], Some(flow));
@@ -393,7 +393,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           let flow = self.flows[index].as_mut().unwrap();
           flow.channel_indices = channel_indices;
           if let Some(now) = now_opt {
-            flow.keep_alive(now, self.sample_rate);
+            flow.keep_alive(now as Clock, self.sample_rate);
           }
           if flow.expired.load(Ordering::Relaxed) {
             info!("resuscitating expired flow index={index}");

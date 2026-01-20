@@ -28,7 +28,7 @@ pcm.inferno {
 	CLOCK_PATH $CLOCK_PATH
 	RX_LATENCY_NS $RX_LATENCY_NS
 	TX_LATENCY_NS $TX_LATENCY_NS
-	
+
 	hint {
 		show on
 		description "Inferno ALSA virtual device"

@@ -54,15 +54,19 @@ impl MediaClock {
     self.overlay.map(|overlay| overlay.now_ns() as FineClock)
   }
   #[inline(always)]
-  pub fn now_in_timebase(&self, timebase_hz: u64) -> Option<Clock> {
+  pub fn now_in_timebase(&self, timebase_hz: u64) -> Option<LongClock> {
     self.now_ns().map(|ns| {
       // TODO it will jump when underlying wraps
-      ((ns as u128) * (timebase_hz as u128) / 1_000_000_000u128) as Clock
+      ((ns as u128) * (timebase_hz as u128) / 1_000_000_000u128) as LongClock
     })
+  }
+  #[inline(always)]
+  pub fn wrapping_now_in_timebase(&self, timebase_hz: u64) -> Option<Clock> {
+    self.now_in_timebase(timebase_hz).map(|x| x as Clock)
   }
   pub fn system_clock_duration_until(
     &mut self,
-    timestamp: Clock,
+    timestamp: LongClock,
     timebase_hz: u64,
   ) -> Option<std::time::Duration> {
     let now_ns = self.now_ns()?;
@@ -82,11 +86,10 @@ impl MediaClock {
     until: Clock,
     timebase_hz: u64,
   ) -> Option<std::time::Duration> {
-    let until_ns = (until as u128 * 1_000_000_000u128 / timebase_hz as u128) as FineClock;
-    let from_ns = (from as u128 * 1_000_000_000u128 / timebase_hz as u128) as FineClock;
-    let remaining = (until_ns as FineClockDiff).wrapping_sub(from_ns as FineClockDiff);
-    let corr = (remaining as f64 * self.overlay?.freq_scale) as FineClockDiff;
-    let duration = remaining - corr; // FIXME it should be * 1/(1+freq_scale) but should be good enough for low correction values
+    let duration_in_tb = wrapped_diff(until, from);
+    let duration_ns = (duration_in_tb as i64 * 1_000_000_000i64 / timebase_hz as i64) as FineClockDiff;
+    let corr = (duration_ns as f64 * self.overlay?.freq_scale) as FineClockDiff;
+    let duration = duration_ns - corr; // FIXME it should be * 1/(1+freq_scale) but should be good enough for low correction values
     if duration > 0 {
       Some(std::time::Duration::from_nanos(duration as u64))
     } else {

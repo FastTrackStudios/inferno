@@ -1,14 +1,13 @@
+use super::samples_collector::SamplesCollector;
+use crate::media_clock::MediaClock;
 use crate::net_utils::{create_mio_udp_socket, MAX_PAYLOAD_BYTES};
 use crate::protocol::mcast::make_channel_change_notification;
-use super::samples_collector::SamplesCollector;
 use crate::state_storage::StateStorage;
-use crate::media_clock::MediaClock;
 use crate::{common::*, mdns_client::AdvertisedChannel, protocol::flows_control::FlowHandle};
 
 use crate::device_info::DeviceInfo;
 use crate::{
-  protocol::mcast::MulticastMessage, mdns_client::MdnsClient,
-  protocol::flows_control::FlowsControlClient,
+  mdns_client::MdnsClient, protocol::flows_control::FlowsControlClient, protocol::mcast::MulticastMessage,
 };
 
 use crate::ring_buffer::{
@@ -855,7 +854,10 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
           continue;
         }
         let first = (*channels.first_entry().unwrap().get()).clone();
-        let num_channels_in_flow = first.tx_channels_per_flow.min(self.self_info.rx_channels.len()).min(8 /*TODO make it configurable*/);
+        let num_channels_in_flow = first
+          .tx_channels_per_flow
+          .min(self.self_info.rx_channels.len())
+          .min(8 /*TODO make it configurable*/);
         for chunk in &channels.iter().chunks(num_channels_in_flow) {
           let chunk = chunk.collect_vec();
           let flow_index = match flows_locked.iter().position(|o| o.is_none()) {
@@ -997,7 +999,9 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
     while let Some(updates) = rx.recv().await {
       trace!("got update from channel");
       let mut changed_channels = vec![];
-      let now = self.media_clock.write().unwrap().now_in_timebase(self.self_info.sample_rate as u64);
+      // used only for ringbuffer positions so can be wrapping
+      let now =
+        self.media_clock.write().unwrap().wrapping_now_in_timebase(self.self_info.sample_rate as u64);
       let now = match now {
         Some(v) => v,
         None => {
@@ -1020,7 +1024,11 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
           let remote = upd.remote.clone();
           let flow = flows[remote.local_flow_index].as_mut().unwrap();
           if remote.channel_in_flow >= flow.tx_channels.len() {
-            error!("BUG: channel in flow index {} but this flow has {} channels", remote.channel_in_flow, flow.tx_channels.len());
+            error!(
+              "BUG: channel in flow index {} but this flow has {} channels",
+              remote.channel_in_flow,
+              flow.tx_channels.len()
+            );
             continue;
           }
           flow.tx_channels[remote.channel_in_flow] = Some(remote.tx_channel_id);

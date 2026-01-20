@@ -207,6 +207,7 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
                 }
             }
         }
+        // here we must use long now_in_timebase (not wrapping) because boundary may be not power-of-2
         let now_samples_opt = this.media_clock.now_in_timebase((*io).rate as u64);
         if now_samples_opt.is_some() && this.start_time.is_none() {
             /*warn!("warning: setting start_time in plugin_pointer, not plugin_start");
@@ -237,7 +238,7 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         .boundary
         .try_into()
         .unwrap();
-    let max_diff = boundary / 4;
+    let max_diff = boundary >> 2;
     let appl_ptr = ((*io).appl_ptr as snd_pcm_sframes_t)
         .wrapping_add(this.stream_info.as_ref().unwrap().boundary_add.0);
     let mut diff = ptr.wrapping_sub(appl_ptr);
@@ -480,7 +481,11 @@ unsafe extern "C" fn plugin_start(io: *mut snd_pcm_ioplug_t) -> c_int {
             warn!("no overlay for media_clock");
         }
     }
-    let now_samples_opt = this.media_clock.now_in_timebase((*io).rate as u64);
+    // start_time is used (mostly via channels) in:
+    // * flows_rx and flows_ts for calculating ringbuffer positions
+    // * plugin_pointer for calculating pointer
+    // all these calculations are wrapping so we can use wrapping clock
+    let now_samples_opt = this.media_clock.wrapping_now_in_timebase((*io).rate as u64);
     if now_samples_opt.is_some() && this.start_time.is_none() {
         this.start_time = Some(now_samples_opt.unwrap() as usize);
         if let Err(e) = this
