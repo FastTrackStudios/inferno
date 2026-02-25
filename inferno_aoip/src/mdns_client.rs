@@ -1,6 +1,12 @@
 use crate::{common::*, device_info::DeviceInfo};
 use std::{
-  collections::BTreeMap, error::Error, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::{self}, sync::Arc, time::Duration
+  collections::BTreeMap,
+  error::Error,
+  io,
+  net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+  str::{self},
+  sync::Arc,
+  time::Duration,
 };
 
 use searchfire::{
@@ -67,7 +73,7 @@ impl MdnsClient {
     Self {
       listen_ip: self_info.ip_address,
       self_origin: self_origin_from_self_info(&self_info),
-      self_info
+      self_info,
     }
   }
   async fn do_single_query(
@@ -83,10 +89,8 @@ impl MdnsClient {
       .map_err(|e| Box::new(e))?
       .single_query(types, fqdn, timeout, |origin_addr, response| {
         let is_local = match origin_addr.ip() {
-          std::net::IpAddr::V4(addr) => {
-            addr.is_loopback() || addr==self.listen_ip
-          },
-          _ => false
+          std::net::IpAddr::V4(addr) => addr.is_loopback() || addr == self.listen_ip,
+          _ => false,
         };
         if is_local {
           let response_origin_fqdn = Name::from_labels(["_inferno-response-origin", "local"]).unwrap();
@@ -115,7 +119,11 @@ impl MdnsClient {
       .await
       .map_err(|e| Box::new(e).into())
   }
-  async fn a_record_exists_single_check(&self, fqdn_parts: &[&str], timeout: Duration) -> Result<bool, Box<dyn Error>> {
+  async fn a_record_exists_single_check(
+    &self,
+    fqdn_parts: &[&str],
+    timeout: Duration,
+  ) -> Result<bool, Box<dyn Error>> {
     let fqdn = Name::from_labels(fqdn_parts.iter().map(|&s| s.as_bytes())).map_err(|e| Box::new(e))?;
     match self.do_single_query(&[RecordType::A], &fqdn, timeout).await {
       Ok(response) => {
@@ -133,15 +141,21 @@ impl MdnsClient {
     debug!("checking if A record exists: {fqdn_parts:?}");
     for _ in 0..3 {
       let r = self.a_record_exists_single_check(fqdn_parts, Duration::from_millis(400)).await?;
-      if r { return Ok(r) };
+      if r {
+        return Ok(r);
+      };
     }
     Ok(false)
   }
   pub async fn is_multicast_ip_already_used(&self, addr: Ipv4Addr) -> Result<bool, Box<dyn Error>> {
     let octets = addr.octets();
     let name = [
-      &octets[3].to_string(), &octets[2].to_string(), &octets[1].to_string(), &octets[0].to_string(),
-      "in-addr", "local"
+      &octets[3].to_string(),
+      &octets[2].to_string(),
+      &octets[1].to_string(),
+      &octets[0].to_string(),
+      "in-addr",
+      "local",
     ];
     self.a_record_exists(&name).await
   }
@@ -149,7 +163,8 @@ impl MdnsClient {
   pub async fn query(&self, fqdn_parts: &[&str]) -> Result<AdvertisedService, Box<dyn Error>> {
     debug!("resolving {fqdn_parts:?}");
     let fqdn = Name::from_labels(fqdn_parts.iter().map(|&s| s.as_bytes())).map_err(|e| Box::new(e))?;
-    let response = self.do_single_query(&[RecordType::SRV, RecordType::TXT], &fqdn, Duration::from_secs(3)).await?;
+    let response =
+      self.do_single_query(&[RecordType::SRV, RecordType::TXT], &fqdn, Duration::from_secs(3)).await?;
     let mut target = None;
     let mut properties = BTreeMap::new();
     for record in response.answers() {
@@ -171,6 +186,22 @@ impl MdnsClient {
     }
     if let Some((name, port)) = target {
       for record in response.additionals() {
+        if record.name().to_lowercase() != name.to_lowercase() {
+          continue;
+        }
+        if let Some(rdata) = record.data() {
+          if let Some(a) = rdata.as_a() {
+            return Ok(AdvertisedService {
+              addr: SocketAddr::new(std::net::IpAddr::V4(*a), port),
+              properties,
+            });
+          }
+        }
+      }
+      // if at this point we haven't returned from this method,
+      // it means that additional A record wasn't contained in the response
+      let a_response = self.do_single_query(&[RecordType::A], &name, Duration::from_secs(3)).await?;
+      for record in a_response.answers() {
         if record.name().to_lowercase() != name.to_lowercase() {
           continue;
         }
