@@ -282,7 +282,7 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
     }
 
     ptr = ptr.wrapping_add(this.stream_info.as_ref().unwrap().boundary_add.0);
-    if ptr > boundary {
+    if ptr >= boundary {
         this.stream_info.as_mut().unwrap().boundary_add -= boundary;
         ptr -= boundary;
     }
@@ -469,8 +469,10 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
 }
 
 unsafe extern "C" fn plugin_start(io: *mut snd_pcm_ioplug_t) -> c_int {
-    debug!("plugin_start called");
+    let appl_ptr = (*io).appl_ptr as snd_pcm_sframes_t;
+    debug!("plugin_start called with appl_ptr: {appl_ptr}");
     let this = get_private(io);
+    
     if let Some(clock_receiver) = &mut this.clock_receiver {
         clock_receiver.update();
         debug!("clock_receiver updated");
@@ -517,6 +519,7 @@ unsafe extern "C" fn plugin_stop(io: *mut snd_pcm_ioplug_t) -> c_int {
 
     let this = get_private(io);
     *this.buffers_valid.write().unwrap() = false;
+    drop(this.start_time_tx.take());
 
     // TODO blocking_send inside mutex, risk of deadlock?
     if let Some(common_mutex) = get_instance(&this.settings) {
@@ -605,6 +608,7 @@ unsafe extern "C" fn plugin_transfer(
 unsafe extern "C" fn plugin_close(io: *mut snd_pcm_ioplug_t) -> c_int {
     debug!("plugin_close called");
     let this = get_private(io);
+    drop(this.start_time_tx.take());
     {
         let mut instances_locked = global_instances.write().unwrap();
         // TODO blocking_send inside mutex, risk of deadlock?
