@@ -208,6 +208,7 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
             }
         }
         // here we must use long now_in_timebase (not wrapping) because boundary may be not power-of-2
+        // TODO: optimize by setting plugin_pointer callback depending on whether boundary is power-of-2
         let now_samples_opt = this.media_clock.now_in_timebase((*io).rate as u64);
         if now_samples_opt.is_some() && this.start_time.is_none() {
             /*warn!("warning: setting start_time in plugin_pointer, not plugin_start");
@@ -276,9 +277,12 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
             return (-EPIPE).try_into().unwrap(); // report xrun
         }
 
-        return (-EPIPE).try_into().unwrap(); // report xrun
-                                             // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
-                                             // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
+        // workaround for pipewire: grace period during startup:
+        if ptr > 100000 || this.stream_info.as_ref().unwrap().boundary_add.0 != 0 {
+            return (-EPIPE).try_into().unwrap(); // report xrun
+            // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
+            // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
+        }
     }
 
     ptr = ptr.wrapping_add(this.stream_info.as_ref().unwrap().boundary_add.0);

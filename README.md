@@ -127,15 +127,23 @@ This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later. You 
 
 # Tested with
 ## Dante devices
-* Audinate AVIO AES3
-* Audinate AVIO-DAI2
-* Audinate AVIO USBC (AVIO-DIOUSBC)
+* Audinate AVIO
+  * AVIO-AES3
+  * AVIO-DAI2
+  * AVIO-DIOUSBC
 * Ben & Fellows 523019 4x4 balanced analog I/O module (based on Dante UltimoX4)
-* Klark Teknik DN32-DANTE (Behringer X32) (based on Dante Brooklyn II)
-* Behringer Aoip-Dante (Behringer Wing-Rack) (based on Dante Brooklyn III)
+* MUSIC Group
+  * Klark Teknik DN32-DANTE (in Behringer X32) (based on Dante Brooklyn II)
+  * Behringer Aoip-Dante (in Behringer Wing-Rack) (based on Dante Brooklyn III)
 * Orban Optimod 5750 (based on Dante Broadway)
-* Soundcraft Vi2000 & Vi3000
-* Allen&Heath SQ-5 & SQ-6
+* Soundcraft
+  * Vi2000
+  * Vi3000
+* Allen&Heath
+  * SQ-5
+  * SQ-6
+  * Qu-5D
+* Yamaha Dante-MY16-AUD (in Yamaha LS9) (also tested with old 3.x Dante firmware version)
 * ESI planet 22c
 * Dante Via @ OS X and Windows 11
 * Dante Virtual Soundcard @ Windows 10
