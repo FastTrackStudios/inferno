@@ -353,7 +353,7 @@ At this point, Inferno will roughly become alternative to Dante Virtual Soundcar
 * ability to work as a clock source (PTPv1 leader) - Statime
   * it is already possible if you use PTPv2 - in theory you should be able to make Inferno-only AoIP network - not tested yet
 * add more apps and Linux distributions to the integration test
-* bit-perfect transmitter (currently 32-bit integers are always used internally and conversion to 24-bit or 16-bit adds dither)
+* bit-perfect transmitter (32-bit integers are always used internally; TX dithering for 16-bit and 24-bit output is configurable via `TX_SOURCE_BIT_DEPTH`)
 * command line helper / TUI / GUI
 * installer script, with cross compilation support
 * more refactoring of network packets serializers & deserializers to make more code reusable in upcoming controller app (because DC is bloated closed source and bad UX)
