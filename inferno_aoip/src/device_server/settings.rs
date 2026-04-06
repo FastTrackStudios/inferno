@@ -151,6 +151,7 @@ pub struct Settings {
   pub tx_latency_ns: u32,
   pub clock_path: Option<PathBuf>,
   pub use_safe_clock: bool,
+  pub tx_source_bit_depth: u8,
 }
 
 impl Settings {
@@ -177,6 +178,14 @@ impl Settings {
       .get("USE_SAFE_CLOCK")
       .map(|s| s.parse().expect("invalid USE_SAFE_CLOCK, must be boolean"))
       .unwrap_or(false);
+    let tx_source_bit_depth = config
+      .get("TX_SOURCE_BIT_DEPTH")
+      .map(|s| s.parse::<u8>().expect("invalid TX_SOURCE_BIT_DEPTH, must be one of: 16, 24, 32"))
+      .unwrap_or(32);
+    assert!(
+      matches!(tx_source_bit_depth, 16 | 24 | 32),
+      "invalid TX_SOURCE_BIT_DEPTH, must be one of: 16, 24, 32"
+    );
 
     let mut result = Self {
       self_info,
@@ -186,6 +195,7 @@ impl Settings {
         .unwrap_or(10_000_000),
       clock_path: config.get("CLOCK_PATH").map(|p| p.try_into().unwrap()),
       use_safe_clock,
+      tx_source_bit_depth,
     };
 
     // the following should be harmless, as the application still has the chance to overwrite it

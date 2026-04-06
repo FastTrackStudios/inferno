@@ -101,12 +101,18 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
   clock_offset_samples: LongClockDiff,
   max_lag_samples: usize,
   timestamp_shift: ClockDiff,
+  tx_source_bit_depth: u8,
   current_timestamp: Arc<AtomicUsize>,
   on_transfer: Option<TransferNotifier>,
   //callback: SamplesRequestCallback,
 }
 
 impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
+  #[inline(always)]
+  fn should_dither(&self, output_bit_depth: u8) -> bool {
+    self.tx_source_bit_depth > output_bit_depth
+  }
+
   fn now(&self) -> Option<LongClock> {
     self.clock.now_in_timebase(self.sample_rate as u64)
   }
@@ -120,6 +126,8 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     let max_lag_samples = self.max_lag_samples;
     let mut iterations = 0;
     let mut max_missing_samples = 0;
+    let dither_16 = self.should_dither(16);
+    let dither_24 = self.should_dither(24);
     for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
       if flow.expired.load(Ordering::Relaxed) {
         continue;
@@ -166,8 +174,20 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
             let start = 9 + index_in_flow * flow.bytes_per_sample;
             let samples = &tmp_samples[0..flow.fpp];
             match flow.bytes_per_sample {
-              2 => write_s16_samples(samples, &mut pbuff, start, stride, Some(dither_rng)),
-              3 => write_s24_samples(samples, &mut pbuff, start, stride, Some(dither_rng)),
+              2 => write_s16_samples::<_, SmallRng>(
+                samples,
+                &mut pbuff,
+                start,
+                stride,
+                if dither_16 { Some(dither_rng) } else { None },
+              ),
+              3 => write_s24_samples::<_, SmallRng>(
+                samples,
+                &mut pbuff,
+                start,
+                stride,
+                if dither_24 { Some(dither_rng) } else { None },
+              ),
               4 => write_s32_samples::<_, SmallRng>(samples, &mut pbuff, start, stride, None),
               other => {
                 error!("BUG: unsupported bytes per sample {}", other);
@@ -446,6 +466,7 @@ fn split_handle(h: FlowHandle) -> (u32, u16) {
 impl FlowsTransmitter {
   async fn run<P: ProxyToSamplesBuffer>(
     rx: mpsc::Receiver<Command>,
+    tx_source_bit_depth: u8,
     clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
     sample_rate: u32,
     latency_ns: usize,
@@ -466,6 +487,7 @@ impl FlowsTransmitter {
       send_latency_samples: latency.try_into().unwrap(), // TODO in ALSA plugin should be 0, the more the worse because aplay wants to fill the whole buffer
       max_lag_samples,
       timestamp_shift: (0 as ClockDiff).wrapping_sub_unsigned(latency.try_into().unwrap()),
+      tx_source_bit_depth,
       clock_offset_samples: (CLOCK_OFFSET_NS as i64 * sample_rate as i64 / 1_000_000_000i64)
         .try_into()
         .unwrap(),
@@ -477,6 +499,7 @@ impl FlowsTransmitter {
   pub fn start<P: ProxyToSamplesBuffer + Send + Sync + 'static>(
     self_info: Arc<DeviceInfo>,
     tx_latency_ns: usize,
+    tx_source_bit_depth: u8,
     clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
     channels_outputs: Vec<RBOutput<Sample, P>>,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
@@ -490,6 +513,7 @@ impl FlowsTransmitter {
     let thread_join = run_future_in_new_thread("flows TX", move || {
       Self::run(
         rx,
+        tx_source_bit_depth,
         clock_recv,
         srate,
         0, /*LATENCY TODO*/
