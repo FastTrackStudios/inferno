@@ -40,6 +40,7 @@ struct Multicaster<'s> {
   clock: Arc<RwLock<MediaClock>>,
   channels_subscriber: Option<Arc<ChannelsSubscriber>>,
   get_peaks: PeaksCallback,
+  had_clock: bool,
 }
 
 impl<'s> Multicaster<'s> {
@@ -74,6 +75,7 @@ impl<'s> Multicaster<'s> {
       clock,
       channels_subscriber: None,
       get_peaks,
+      had_clock: false,
     };
     write_str_to_buffer(&mut r.vendor, 0, 8, &self_info.vendor_string);
     return r;
@@ -256,9 +258,13 @@ impl<'s> Multicaster<'s> {
       0x00, 0x1c, 0x80, 0x04, 0x00, 0x04, 0x00, 0x10, 0x17, 0x0f, 0x00, 0x00,
       0x00, 0x02, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, missed packets, 4B: 0x00, 0x03, 0x90, 0x1e, 0x00, 0x00, 0x00, 0x00
        */
+       if !self.had_clock {
+         debug!("clock appeared");
+       }
     } else {
       debug!("no clock available");
     }
+    self.had_clock = freq_offset_opt.is_some();
 
     let content = bytes.as_bytes();
     self.send(self.heartbeat_destination, 0xfffe, [0, 8, 0, 1, 0x10, 0, 0, 0], &content).await;

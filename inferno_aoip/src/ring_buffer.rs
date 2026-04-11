@@ -254,8 +254,6 @@ impl<T: Default + NoUninit, P: ProxyToBuffer<Atomic<T>>> RBInput<T, P> {
     // Did we have a hole before current invocation?
     hole |= self.rb.readable_pos.load(Ordering::Relaxed) != self.rb.writing_pos.load(Ordering::Relaxed);
 
-    // FIXME: wrapping_add % items_size may result in unexpected behaviour if items_size is not power of 2
-    // TODO: ensure that items_size is power of 2
     let end_ts = start_timestamp.wrapping_add(input_len);
 
     // Update writing_pos to let RBOutput know that that we're going to write some items

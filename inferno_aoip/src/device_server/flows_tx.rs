@@ -222,7 +222,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           flow.keep_alive(now as Clock, sample_rate);
         } else if wrapped_diff(flow.expires.unwrap(), now as Clock) < 0 {
           flow.expired.store(true, Ordering::Release);
-          info!("flow dst {:?} expired", flow.socket.peer_addr().ok());
+          info!("flow dst {:?} expired (no keepalives received)", flow.socket.peer_addr().ok());
         }
       }
     }
