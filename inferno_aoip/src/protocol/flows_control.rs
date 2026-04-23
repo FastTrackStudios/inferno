@@ -81,8 +81,8 @@ impl FlowsControlClient {
         Ok(Err(e)) => {
           return Err(Box::new(e));
         }
-        Err(e) => {
-          return Err(Box::new(e));
+        Err(_) => {
+          return Err(Box::new(std::io::Error::from(ErrorKind::TimedOut)));
         }
       };
       if recv_size < HEADER_LENGTH {

@@ -48,7 +48,7 @@ pub fn read_0term_str_from_buffer(buffer: &[u8], offset: usize) -> Result<&str, 
   }
   let ntpos = match buffer[offset..].iter().position(|c| *c == 0) {
     Some(x) => x,
-    None => buffer.len(),
+    None => buffer.len()-offset,
   };
   return str::from_utf8(&buffer[offset..][..ntpos]).map_err(|e| Box::new(e) as Box<dyn Error>);
 }
