@@ -406,3 +406,208 @@ pub fn deserialize_items<'a, T: BinarySerde>(payload: &'a [u8]) -> ItemsInPacket
     _t: Default::default()
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use binary_serde::recursive_array::RecursiveArray;
+  use binary_serde::BinarySerde;
+
+  #[test]
+  fn flags2_bitfield_roundtrip() {
+    let original = channels_and_flows_count::Flags2 {
+      unknown1_0: 0x0A,
+      supports_tx_channel_rename: true,
+      supports_tx_multicast: false,
+      unknown2_0: 0x03,
+    };
+    let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
+    let deserialized = channels_and_flows_count::Flags2::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    assert_eq!(original.unknown1_0, deserialized.unknown1_0);
+    assert_eq!(original.supports_tx_channel_rename, deserialized.supports_tx_channel_rename);
+    assert_eq!(original.supports_tx_multicast, deserialized.supports_tx_multicast);
+    assert_eq!(original.unknown2_0, deserialized.unknown2_0);
+  }
+
+  #[test]
+  fn channels_and_flows_count_response_roundtrip() {
+    let original = channels_and_flows_count::Response {
+      unknown1_0: 5,
+      flags2: channels_and_flows_count::Flags2 {
+        unknown1_0: 0,
+        supports_tx_channel_rename: true,
+        supports_tx_multicast: true,
+        unknown2_0: 0,
+      },
+      tx_channels_count: 8,
+      rx_channels_count: 8,
+      unknown2_4: 1,
+      max_channels_in_flow: 8,
+      unknown4_8: 0,
+      max_tx_flows: 4,
+      max_rx_flows: 4,
+      unknown5_total_channels: 16,
+      unknown6_1: 1,
+      unknown7_1: 1,
+      unknown8_0: [0; 6],
+    };
+    let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
+    let deserialized = channels_and_flows_count::Response::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    assert_eq!(original, deserialized);
+  }
+
+  #[test]
+  fn common_channels_descriptor_new_matches_device_info() {
+    let device = DeviceInfo {
+      ip_address: std::net::Ipv4Addr::new(192, 168, 1, 1),
+      netmask: std::net::Ipv4Addr::new(255, 255, 255, 0),
+      gateway: std::net::Ipv4Addr::new(192, 168, 1, 1),
+      mac_address: netdev::mac::MacAddr::from_hex_format("00:11:22:33:44:55"),
+      link_speed: 1000,
+      board_name: "TestBoard".to_string(),
+      manufacturer: "TestMfg".to_string(),
+      model_name: "TestModel".to_string(),
+      model_number: "123".to_string(),
+      factory_device_id: [1, 2, 3, 4, 5, 6, 7, 8],
+      process_id: 1,
+      vendor_string: "TestVendor".to_string(),
+      friendly_hostname: "test".to_string(),
+      factory_hostname: "factory".to_string(),
+      rx_channels: vec![],
+      tx_channels: vec![],
+      bits_per_sample: 24,
+      pcm_type: 0x0e,
+      latency_ns: 5000000,
+      sample_rate: 48000,
+      arc_port: 4440,
+      cmc_port: 8800,
+      flows_control_port: 4455,
+      info_request_port: 8700,
+    };
+    let desc = CommonChannelsDescriptor::new(&device);
+    assert_eq!(desc.sample_rate, 48000);
+    assert_eq!(desc.bits_per_sample_1, 24);
+    assert_eq!(desc.bits_per_sample_2, 24);
+    assert_eq!(desc.bits_per_sample_3, 24);
+    assert_eq!(desc.pcm_type, 0x0e);
+    assert_eq!(desc.unknown1_1, 1);
+    assert_eq!(desc.unknown2_1, 1);
+    assert_eq!(desc.unknown3_400, 0x400);
+  }
+
+  #[test]
+  fn destination_socket_descriptor_roundtrip() {
+    let original = DestinationSocketDescriptor {
+      unknown1_8002: 0x8002,
+      port: 5004,
+      addr: [192, 168, 1, 100],
+    };
+    let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
+    let deserialized = DestinationSocketDescriptor::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    assert_eq!(original.unknown1_8002, deserialized.unknown1_8002);
+    assert_eq!(original.port, deserialized.port);
+    assert_eq!(original.addr, deserialized.addr);
+  }
+
+  #[test]
+  fn get_receive_channels_channel_descriptor_roundtrip() {
+    let original = get_receive_channels::ChannelDescriptor {
+      channel_id: 5,
+      unknown1_6: 6,
+      common_descriptor_offset: 10,
+      tx_channel_name_offset: 20,
+      tx_hostname_offset: 30,
+      friendly_name_offset: 40,
+      subscription_status: 0x01010009,
+      unknown2_0: 0,
+    };
+    let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
+    let deserialized = get_receive_channels::ChannelDescriptor::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    assert_eq!(original.channel_id, deserialized.channel_id);
+    assert_eq!(original.subscription_status, deserialized.subscription_status);
+  }
+
+  #[test]
+  fn get_transmit_channels_channel_descriptor_roundtrip() {
+    let original = get_transmit_channels::ChannelDescriptor {
+      channel_id: 3,
+      unknown1_7: 7,
+      common_descriptor_offset: 12,
+      name_offset: 24,
+    };
+    let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
+    let deserialized = get_transmit_channels::ChannelDescriptor::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    assert_eq!(original.channel_id, deserialized.channel_id);
+    assert_eq!(original.name_offset, deserialized.name_offset);
+  }
+
+  #[test]
+  fn rename_tx_channels_request_roundtrip() {
+    let original = rename_tx_channels::SingleChannelRenameRequest {
+      unknown1_0: 0,
+      channel_id: 7,
+      new_name_offset: 42,
+    };
+    let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
+    let deserialized = rename_tx_channels::SingleChannelRenameRequest::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    assert_eq!(original.channel_id, deserialized.channel_id);
+    assert_eq!(original.new_name_offset, deserialized.new_name_offset);
+  }
+
+  #[test]
+  fn query_tx_flows_flow_descriptor_header_roundtrip() {
+    let original = query_tx_flows::FlowDescriptorHeader {
+      flow_id: 1,
+      flow_type: 0x11,
+      sample_rate: 48000,
+      unknown1_0: 0,
+      bits_per_sample: 24,
+      unknown2_1: 1,
+      channels_count: 2,
+      receiver_socket_descriptor_offset: 100,
+    };
+    let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
+    let deserialized = query_tx_flows::FlowDescriptorHeader::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    assert_eq!(original.flow_id, deserialized.flow_id);
+    assert_eq!(original.flow_type, deserialized.flow_type);
+    assert_eq!(original.sample_rate, deserialized.sample_rate);
+    assert_eq!(original.channels_count, deserialized.channels_count);
+  }
+
+  #[test]
+  fn query_rx_flows_descriptor2_roundtrip() {
+    let original = query_rx_flows::Descriptor2 {
+      unknown1_9: 9,
+      unknown2_1: 1,
+      unknown3_800: 0x800,
+      unknown4_0: 0,
+      latency_ns: 5000000,
+      unknown5_0: 0,
+    };
+    let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
+    let deserialized = query_rx_flows::Descriptor2::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    assert_eq!(original.latency_ns, deserialized.latency_ns);
+    assert_eq!(original.unknown3_800, deserialized.unknown3_800);
+  }
+
+  #[test]
+  fn extract_start_index_valid() {
+    assert_eq!(extract_start_index(&[0, 0, 0, 5]), Some(4));
+  }
+
+  #[test]
+  fn extract_start_index_too_short() {
+    assert_eq!(extract_start_index(&[0, 0, 0]), None);
+  }
+
+  #[test]
+  fn extract_start_index_zero_value() {
+    assert_eq!(extract_start_index(&[0, 0, 0, 0]), None);
+  }
+
+  #[test]
+  fn deserialize_items_empty() {
+    let items: Vec<get_receive_channels::ChannelDescriptor> = deserialize_items(&[0, 0]).collect();
+    assert!(items.is_empty());
+  }
+}

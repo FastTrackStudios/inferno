@@ -160,3 +160,71 @@ pub fn async_clock_receiver_to_realtime(
   });
   rt_recv
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn timestamp_to_clock_value_basic() {
+    let ts = clock_steering::Timestamp { seconds: 1, nanos: 500_000_000 };
+    assert_eq!(timestamp_to_clock_value(ts), 1_500_000_000);
+  }
+
+  #[test]
+  fn timestamp_to_clock_value_zero() {
+    let ts = clock_steering::Timestamp { seconds: 0, nanos: 0 };
+    assert_eq!(timestamp_to_clock_value(ts), 0);
+  }
+
+  #[test]
+  fn timestamp_to_clock_value_large() {
+    let ts = clock_steering::Timestamp { seconds: i64::MAX, nanos: 999_999_999 };
+    let expected = (i64::MAX as u64).wrapping_mul(1_000_000_000).wrapping_add(999_999_999);
+    assert_eq!(timestamp_to_clock_value(ts), expected);
+  }
+
+  #[test]
+  fn media_clock_new_not_ready() {
+    let clock = MediaClock::new(false);
+    assert!(!clock.is_ready());
+    assert!(clock.get_overlay().is_none());
+  }
+
+  #[test]
+  fn media_clock_update_overlay_becomes_ready() {
+    let mut clock = MediaClock::new(false);
+    let overlay = ClockOverlay {
+      clock_id: 1,
+      last_sync: 0,
+      shift: 0,
+      freq_scale: 0.0,
+    };
+    clock.update_overlay(overlay);
+    assert!(clock.is_ready());
+    assert!(clock.get_overlay().is_some());
+  }
+
+  #[test]
+  fn media_clock_update_overlay_replaces() {
+    let mut clock = MediaClock::new(false);
+    let overlay1 = ClockOverlay {
+      clock_id: 1,
+      last_sync: 100,
+      shift: 0,
+      freq_scale: 0.0,
+    };
+    let overlay2 = ClockOverlay {
+      clock_id: 1,
+      last_sync: 200,
+      shift: 50,
+      freq_scale: 0.001,
+    };
+    clock.update_overlay(overlay1);
+    assert_eq!(clock.get_overlay().unwrap().clock_id, 1);
+    assert_eq!(clock.get_overlay().unwrap().last_sync, 100);
+    clock.update_overlay(overlay2);
+    assert_eq!(clock.get_overlay().unwrap().clock_id, 1);
+    assert_eq!(clock.get_overlay().unwrap().last_sync, 200);
+  }
+}

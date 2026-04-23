@@ -98,3 +98,115 @@ samples_rw!(
   write_s32_samples,
   u8 // won't be used anyway
 );
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use rand::rngs::mock::StepRng;
+
+  #[test]
+  fn s16_reader_iterator_correct_values() {
+    let bytes: Vec<u8> = vec![0x12, 0x34, 0x56, 0x78];
+    let reader = SamplesReader {
+      bytes: &bytes,
+      read_pos: 0,
+      stride: 2,
+      remaining_samples: 2,
+    };
+    let mut iter = S16ReaderIterator(reader);
+    assert_eq!(iter.next(), Some(0x12340000i32));
+    assert_eq!(iter.next(), Some(0x56780000i32));
+    assert_eq!(iter.next(), None);
+  }
+
+  #[test]
+  fn s24_reader_iterator_correct_values() {
+    let bytes: Vec<u8> = vec![0x12, 0x34, 0x56, 0xAB, 0xCD, 0xEF];
+    let reader = SamplesReader {
+      bytes: &bytes,
+      read_pos: 0,
+      stride: 3,
+      remaining_samples: 2,
+    };
+    let mut iter = S24ReaderIterator(reader);
+    assert_eq!(iter.next(), Some(0x12345600i32));
+    assert_eq!(iter.next(), Some(0xABCDEF00u32 as i32)); // 0xABCDEF00 as signed
+    assert_eq!(iter.next(), None);
+  }
+
+  #[test]
+  fn s32_reader_iterator_correct_values() {
+    let bytes: Vec<u8> = vec![0x12, 0x34, 0x56, 0x78];
+    let reader = SamplesReader {
+      bytes: &bytes,
+      read_pos: 0,
+      stride: 4,
+      remaining_samples: 1,
+    };
+    let mut iter = S32ReaderIterator(reader);
+    assert_eq!(iter.next(), Some(0x12345678i32));
+    assert_eq!(iter.next(), None);
+  }
+
+  #[test]
+  fn write_s16_samples_basic() {
+    let samples: Vec<Sample> = vec![0x12340000, 0x56780000];
+    let mut dst = vec![0u8; 4];
+    write_s16_samples(&samples, &mut dst, 0, 2, None::<&mut StepRng>);
+    assert_eq!(dst, vec![0x12, 0x34, 0x56, 0x78]);
+  }
+
+  #[test]
+  fn write_s24_samples_basic() {
+    let samples: Vec<Sample> = vec![0x12345600, 0xABCDEF00u32 as i32];
+    let mut dst = vec![0u8; 6];
+    write_s24_samples(&samples, &mut dst, 0, 3, None::<&mut StepRng>);
+    assert_eq!(dst, vec![0x12, 0x34, 0x56, 0xAB, 0xCD, 0xEF]);
+  }
+
+  #[test]
+  fn write_s32_samples_basic() {
+    let samples: Vec<Sample> = vec![0x12345678];
+    let mut dst = vec![0u8; 4];
+    write_s32_samples(&samples, &mut dst, 0, 4, None::<&mut StepRng>);
+    assert_eq!(dst, vec![0x12, 0x34, 0x56, 0x78]);
+  }
+
+  #[test]
+  fn exact_size_iterator_length() {
+    let bytes: Vec<u8> = vec![0; 8];
+    let reader = SamplesReader {
+      bytes: &bytes,
+      read_pos: 0,
+      stride: 2,
+      remaining_samples: 4,
+    };
+    let iter = S16ReaderIterator(reader);
+    assert_eq!(iter.len(), 4);
+  }
+
+  #[test]
+  fn writer_stops_at_dst_end() {
+    let samples: Vec<Sample> = vec![0x11227777, 0x33446666, 0x66666666];
+    let mut dst = vec![0u8; 4]; // only room for 2 bytes
+    write_s16_samples(&samples, &mut dst, 0, 2, None::<&mut StepRng>);
+    assert_eq!(dst, vec![0x11, 0x22, 0x33, 0x44]);
+  }
+
+  #[test]
+  fn writer_stops_when_source_exhausted() {
+    let samples: Vec<Sample> = vec![0x12345678];
+    let mut dst = vec![0xFFu8; 8];
+    write_s16_samples(&samples, &mut dst, 0, 2, None::<&mut StepRng>);
+    assert_eq!(&dst[0..2], &[0x12, 0x34]);
+    assert_eq!(&dst[2..], &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+  }
+
+  #[test]
+  fn writer_stride_gaps() {
+    let samples: Vec<Sample> = vec![0x12340000, 0x56780000];
+    let mut dst = vec![0xFFu8; 6];
+    write_s16_samples(&samples, &mut dst, 0, 3, None::<&mut StepRng>);
+    assert_eq!(dst, vec![0x12, 0x34, 0xFF, 0x56, 0x78, 0xFF]);
+  }
+}

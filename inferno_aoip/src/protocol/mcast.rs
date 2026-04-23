@@ -41,7 +41,6 @@ pub fn make_packet<'a>(
   return view.into_storage();
 }
 
-
 pub struct MulticastMessage {
   pub start_code: u16,
   pub opcode: [u8; 8],
@@ -65,4 +64,55 @@ pub fn make_channel_change_notification(
   content[0] = H(mask_len);
   content[1] = L(mask_len);
   MulticastMessage { start_code: 0xffff, opcode: [0x07, 0x2a, 1, 2, 0, 0, 0, 0], content }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn make_packet_produces_correct_header_bytes() {
+    let mut buf = [0u8; 64];
+    let factory_device_id = [1, 2, 3, 4, 5, 6, 7, 8];
+    let vendor = [9, 10, 11, 12, 13, 14, 15, 16];
+    let opcode = [17, 18, 19, 20, 21, 22, 23, 24];
+    let content = [25, 26, 27];
+    let packet =
+      make_packet(&mut buf, 0x1234, 0x5678, 0x9abc, factory_device_id, vendor, opcode, &content);
+
+    let view = mcast_packet::View::new(packet);
+    assert_eq!(view.start_code().read(), 0x1234);
+    assert_eq!(view.total_length().read(), (HEADER_LENGTH + content.len()) as u16);
+    assert_eq!(view.seqnum().read(), 0x5678);
+    assert_eq!(view.process().read(), 0x9abc);
+    assert_eq!(view.factory_device_id(), &factory_device_id);
+    assert_eq!(view.vendor(), &vendor);
+    assert_eq!(view.opcode(), &opcode);
+    assert_eq!(view.content(), &content[..]);
+  }
+
+  #[test]
+  fn make_packet_total_length_equals_header_length_plus_content_len() {
+    let mut buf = [0u8; 256];
+    for content_len in [0, 1, 10, 100, 200] {
+      let content: Vec<u8> = (0..content_len).map(|i| i as u8).collect();
+      let packet = make_packet(&mut buf, 0, 0, 0, [0; 8], [0; 8], [0; 8], &content);
+      assert_eq!(packet.len(), HEADER_LENGTH + content_len);
+      let view = mcast_packet::View::new(packet);
+      assert_eq!(view.total_length().read() as usize, HEADER_LENGTH + content_len);
+    }
+  }
+
+  #[test]
+  fn make_channel_change_notification_empty_iterator() {
+    let msg = make_channel_change_notification(std::iter::empty::<usize>());
+    assert_eq!(msg.content, vec![0, 1, 0]);
+  }
+
+  #[test]
+  fn make_channel_change_notification_returns_start_code_and_opcode() {
+    let msg = make_channel_change_notification([42]);
+    assert_eq!(msg.start_code, 0xffff);
+    assert_eq!(msg.opcode, [0x07, 0x2a, 1, 2, 0, 0, 0, 0]);
+  }
 }

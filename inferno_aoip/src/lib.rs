@@ -47,7 +47,7 @@
 //!
 //! ## Example: Multi-channel peak level meter
 //! 
-//! ```rust
+//! ```no_run
 //! use inferno_aoip::device_server::{DeviceServer, Settings, Sample};
 //! 
 //! fn audio_callback(samples_count: usize, channels: &Vec<Vec<Sample>>) {

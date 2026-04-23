@@ -195,3 +195,64 @@ impl FlowsControlClient {
       .map(|_| ());
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::net::Ipv4Addr;
+  use netdev::mac::MacAddr;
+
+  fn minimal_device_info() -> DeviceInfo {
+    DeviceInfo {
+      ip_address: Ipv4Addr::new(127, 0, 0, 1),
+      netmask: Ipv4Addr::new(0, 0, 0, 0),
+      gateway: Ipv4Addr::new(0, 0, 0, 0),
+      mac_address: MacAddr::zero(),
+      link_speed: 0,
+      board_name: String::new(),
+      manufacturer: String::new(),
+      model_name: String::new(),
+      model_number: String::new(),
+      factory_device_id: [0; 8],
+      process_id: 0,
+      vendor_string: String::new(),
+      friendly_hostname: String::new(),
+      factory_hostname: String::new(),
+      rx_channels: Vec::new(),
+      tx_channels: Vec::new(),
+      bits_per_sample: 0,
+      pcm_type: 0,
+      latency_ns: 0,
+      sample_rate: 0,
+      arc_port: 0,
+      cmc_port: 0,
+      flows_control_port: 0,
+      info_request_port: 0,
+    }
+  }
+
+  #[test]
+  fn write_channels_empty_writes_nothing() {
+    let _client = FlowsControlClient::new(Arc::new(minimal_device_info()));
+    let mut buffer = ByteBuffer::new();
+    FlowsControlClient::write_channels(&mut buffer, &[]);
+    assert_eq!(buffer.as_bytes(), &[]);
+  }
+
+  #[test]
+  fn write_channels_some_none() {
+    let _client = FlowsControlClient::new(Arc::new(minimal_device_info()));
+    let mut buffer = ByteBuffer::new();
+    FlowsControlClient::write_channels(&mut buffer, &[Some(1), Some(2), None, Some(4)]);
+    assert_eq!(buffer.as_bytes(), &[0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04]);
+  }
+
+  #[test]
+  fn write_channels_many() {
+    let _client = FlowsControlClient::new(Arc::new(minimal_device_info()));
+    let mut buffer = ByteBuffer::new();
+    let channels: Vec<Option<u16>> = (0..100).map(|i| Some(i)).collect();
+    FlowsControlClient::write_channels(&mut buffer, &channels);
+    assert_eq!(buffer.get_wpos(), 200);
+  }
+}

@@ -33,3 +33,45 @@ impl<T, E: std::fmt::Debug> LogAndForget for Result<T, E> {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn wrapped_diff_positive() {
+    assert_eq!(wrapped_diff(10, 5), 5);
+  }
+
+  #[test]
+  fn wrapped_diff_negative() {
+    assert_eq!(wrapped_diff(5, 10), -5);
+  }
+
+  #[test]
+  fn wrapped_diff_max_to_zero() {
+    assert_eq!(wrapped_diff(usize::MAX, 0), -1);
+  }
+
+  #[test]
+  fn wrapped_diff_zero_to_max() {
+    assert_eq!(wrapped_diff(0, usize::MAX), 1);
+  }
+
+  #[test]
+  fn wrapped_diff_same() {
+    assert_eq!(wrapped_diff(0, 0), 0);
+  }
+
+  #[test]
+  fn log_and_forget_ok() {
+    let result: Result<(), &str> = Ok(());
+    result.log_and_forget();
+  }
+
+  #[test]
+  fn log_and_forget_err() {
+    let result: Result<(), &str> = Err("test error");
+    result.log_and_forget();
+  }
+}
