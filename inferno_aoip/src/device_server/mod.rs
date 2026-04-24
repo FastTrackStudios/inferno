@@ -42,7 +42,7 @@ pub(crate) mod tx_multicasts;
 
 pub use crate::common::{Clock, ClockDiff, Sample};
 pub use crate::media_clock::{MediaClock, RealTimeClockReceiver};
-pub use crate::ring_buffer::{ExternalBufferParameters, PositionReportDestination};
+pub use crate::ring_buffer::{new_owned, ExternalBufferParameters, PositionReportDestination, RBInput};
 pub use settings::Settings;
 pub type AtomicSample = atomic::Atomic<Sample>;
 
@@ -70,6 +70,7 @@ pub struct DeviceServer {
   tx_latency_ns: u32,
   tx_source_bit_depth: u8,
   channels_sub_tx: watch::Sender<Option<Arc<ChannelsSubscriber>>>,
+  channels_subscriber: Option<Arc<ChannelsSubscriber>>,
   flows_tx: Arc<Mutex<Option<FlowsTransmitter>>>,
   tx_multicasts: Arc<Mutex<Option<TransmitMulticasts>>>,
   tx_multicasts_by_channel: Arc<RwLock<BTreeMap<usize, PointerToMulticast>>>,
@@ -165,6 +166,7 @@ impl DeviceServer {
       tx_latency_ns: settings.tx_latency_ns,
       tx_source_bit_depth: settings.tx_source_bit_depth,
       channels_sub_tx,
+      channels_subscriber: None,
       flows_tx,
       tx_multicasts,
       tx_multicasts_by_channel,
@@ -255,6 +257,7 @@ impl DeviceServer {
     );
     let channels_sub_handle = Arc::new(channels_sub_handle);
     let _ = self.channels_sub_tx.send(Some(channels_sub_handle.clone()));
+    self.channels_subscriber = Some(channels_sub_handle.clone());
 
     tasks.push(tokio::spawn(channels_sub_worker));
 
@@ -370,6 +373,22 @@ impl DeviceServer {
   }
   pub async fn stop_transmitter(&mut self) {
     self.tx_shutdown_todo.take().unwrap().await;
+  }
+
+  pub async fn subscribe(&self, local_channel_index: usize, tx_channel_name: &str, tx_hostname: &str) {
+    if let Some(sub) = &self.channels_subscriber {
+      sub.subscribe(local_channel_index, tx_channel_name, tx_hostname).await;
+    } else {
+      warn!("cannot subscribe: receiver not started");
+    }
+  }
+
+  pub async fn unsubscribe(&self, local_channel_index: usize) {
+    if let Some(sub) = &self.channels_subscriber {
+      sub.unsubscribe(local_channel_index).await;
+    } else {
+      warn!("cannot unsubscribe: receiver not started");
+    }
   }
 
   pub fn get_realtime_clock_receiver(&self) -> RealTimeClockReceiver {
