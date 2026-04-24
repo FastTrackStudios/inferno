@@ -7,7 +7,6 @@ pub const MTU: usize = 1500;
 const PACKET_BUFFER_SIZE: usize = MTU;
 pub const MAX_PAYLOAD_BYTES: usize = 1400; // ???
 
-
 pub struct ReceiveBuffer {
   buff: [u8; PACKET_BUFFER_SIZE],
 }

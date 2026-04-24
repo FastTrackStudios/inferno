@@ -199,8 +199,8 @@ impl FlowsControlClient {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::net::Ipv4Addr;
   use netdev::mac::MacAddr;
+  use std::net::Ipv4Addr;
 
   fn minimal_device_info() -> DeviceInfo {
     DeviceInfo {

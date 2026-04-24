@@ -8,11 +8,11 @@ use std::{
 
 use netdev::mac::MacAddr;
 
+use crate::device_info::{Channel, DeviceInfo};
 use crate::protocol::flows_control::PORT as FLOWS_CONTROL_PORT;
 use crate::protocol::mcast::INFO_REQUEST_PORT;
 use crate::protocol::proto_arc::PORT as ARC_PORT;
 use crate::protocol::proto_cmc::PORT as CMC_PORT;
-use crate::device_info::{Channel, DeviceInfo};
 
 fn create_self_info(
   app_name: &str,
@@ -25,12 +25,18 @@ fn create_self_info(
   let interfaces = netdev::get_interfaces();
   let my_ipv4 = my_ip
     .or_else(|| {
-      settings.get("BIND_IP").map(|ipstr| ipstr.parse().unwrap_or_else(|_| {
-        interfaces.iter().find(|iface| &iface.name == ipstr)
-          .expect("invalid setting BIND_IP, must contain IP address or network interface name")
-          .ipv4.get(0).expect("interface specified in BIND_IP has no IPv4 addresses")
-          .addr()
-      }))
+      settings.get("BIND_IP").map(|ipstr| {
+        ipstr.parse().unwrap_or_else(|_| {
+          interfaces
+            .iter()
+            .find(|iface| &iface.name == ipstr)
+            .expect("invalid setting BIND_IP, must contain IP address or network interface name")
+            .ipv4
+            .get(0)
+            .expect("interface specified in BIND_IP has no IPv4 addresses")
+            .addr()
+        })
+      })
     })
     .unwrap_or_else(|| match local_ip_address::local_ip().expect("unknown local IP, cannot continue") {
       IpAddr::V4(a) => a,
@@ -112,7 +118,7 @@ fn create_self_info(
     gateway,
     mac_address,
     link_speed: speed.clamp(0, 10000).try_into().unwrap(),
-    
+
     board_name: "Inferno-AoIP".to_owned(),
     manufacturer: "Inferno-AoIP".to_owned(),
     model_name: app_name.to_owned(),

@@ -107,12 +107,7 @@ mod tests {
   #[test]
   fn s16_reader_iterator_correct_values() {
     let bytes: Vec<u8> = vec![0x12, 0x34, 0x56, 0x78];
-    let reader = SamplesReader {
-      bytes: &bytes,
-      read_pos: 0,
-      stride: 2,
-      remaining_samples: 2,
-    };
+    let reader = SamplesReader { bytes: &bytes, read_pos: 0, stride: 2, remaining_samples: 2 };
     let mut iter = S16ReaderIterator(reader);
     assert_eq!(iter.next(), Some(0x12340000i32));
     assert_eq!(iter.next(), Some(0x56780000i32));
@@ -122,12 +117,7 @@ mod tests {
   #[test]
   fn s24_reader_iterator_correct_values() {
     let bytes: Vec<u8> = vec![0x12, 0x34, 0x56, 0xAB, 0xCD, 0xEF];
-    let reader = SamplesReader {
-      bytes: &bytes,
-      read_pos: 0,
-      stride: 3,
-      remaining_samples: 2,
-    };
+    let reader = SamplesReader { bytes: &bytes, read_pos: 0, stride: 3, remaining_samples: 2 };
     let mut iter = S24ReaderIterator(reader);
     assert_eq!(iter.next(), Some(0x12345600i32));
     assert_eq!(iter.next(), Some(0xABCDEF00u32 as i32)); // 0xABCDEF00 as signed
@@ -137,12 +127,7 @@ mod tests {
   #[test]
   fn s32_reader_iterator_correct_values() {
     let bytes: Vec<u8> = vec![0x12, 0x34, 0x56, 0x78];
-    let reader = SamplesReader {
-      bytes: &bytes,
-      read_pos: 0,
-      stride: 4,
-      remaining_samples: 1,
-    };
+    let reader = SamplesReader { bytes: &bytes, read_pos: 0, stride: 4, remaining_samples: 1 };
     let mut iter = S32ReaderIterator(reader);
     assert_eq!(iter.next(), Some(0x12345678i32));
     assert_eq!(iter.next(), None);
@@ -175,12 +160,7 @@ mod tests {
   #[test]
   fn exact_size_iterator_length() {
     let bytes: Vec<u8> = vec![0; 8];
-    let reader = SamplesReader {
-      bytes: &bytes,
-      read_pos: 0,
-      stride: 2,
-      remaining_samples: 4,
-    };
+    let reader = SamplesReader { bytes: &bytes, read_pos: 0, stride: 2, remaining_samples: 4 };
     let iter = S16ReaderIterator(reader);
     assert_eq!(iter.len(), 4);
   }

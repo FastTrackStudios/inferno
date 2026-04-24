@@ -2,8 +2,8 @@ use crate::common::*;
 use binary_layout::prelude::*;
 use binary_serde::recursive_array::RecursiveArray as _;
 use binary_serde::BinarySerde;
-use std::{borrow::BorrowMut, io::Cursor};
 use std::net::SocketAddr;
+use std::{borrow::BorrowMut, io::Cursor};
 
 use crate::net_utils::{ReceiveBuffer, UdpSocketWrapper, MTU};
 
@@ -64,7 +64,10 @@ impl Connection {
     return self.server.should_work();
   }
 
-  pub async fn recv<'a>(&mut self, recv_buff: &'a mut ReceiveBuffer) -> Option<req_resp_packet::View<&'a [u8]>> {
+  pub async fn recv<'a>(
+    &mut self,
+    recv_buff: &'a mut ReceiveBuffer,
+  ) -> Option<req_resp_packet::View<&'a [u8]>> {
     let (src, request_buf) = match self.server.borrow_mut().recv(recv_buff).await {
       Some(v) => v,
       None => {
@@ -105,6 +108,11 @@ impl Connection {
     self.send(rem.addr, rem.start_code, rem.seqnum, rem.opcode1, opcode2, content).await;
   }
   pub async fn respond_with_struct(&mut self, code: u16, payload: impl BinarySerde) {
-    self.respond_with_code(code, payload.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice()).await;
+    self
+      .respond_with_code(
+        code,
+        payload.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice(),
+      )
+      .await;
   }
 }

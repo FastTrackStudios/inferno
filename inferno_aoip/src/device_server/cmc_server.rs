@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::device_info::DeviceInfo;
 use crate::net_utils::UdpSocketWrapper;
-use crate::protocol::req_resp;
 use crate::protocol::proto_cmc::*;
+use crate::protocol::req_resp;
 use bytebuffer::ByteBuffer;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 

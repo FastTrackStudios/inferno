@@ -46,10 +46,10 @@
 //! * PTP clock synchronization daemon - see [README](https://gitlab.com/lumifaza/inferno/-/blob/dev/README.md?ref_type=heads#clocking-options) for details.
 //!
 //! ## Example: Multi-channel peak level meter
-//! 
+//!
 //! ```no_run
 //! use inferno_aoip::device_server::{DeviceServer, Settings, Sample};
-//! 
+//!
 //! fn audio_callback(samples_count: usize, channels: &Vec<Vec<Sample>>) {
 //!   let line = channels.iter().map(|ch| {
 //!     let peak = (ch.iter().take(samples_count).map(|samp|
@@ -64,23 +64,23 @@
 //!   }).collect::<String>();
 //!   println!("{line}");
 //! }
-//! 
+//!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() {
 //!   let logenv = env_logger::Env::default().default_filter_or("debug");
 //!   env_logger::init_from_env(logenv);
 //!   
 //!   let mut settings = Settings::new(
-//!     "My Peak Meter", 
-//!     "PkMeter", 
+//!     "My Peak Meter",
+//!     "PkMeter",
 //!     None,
 //!     &Default::default()
 //!   );
 //!   settings.make_rx_channels(8);
-//! 
+//!
 //!   let mut server = DeviceServer::start(settings).await;
 //!   server.receive_with_callback(Box::new(audio_callback)).await;
-//! 
+//!
 //!   tokio::signal::ctrl_c().await.ok();
 //!   server.shutdown().await;
 //! }

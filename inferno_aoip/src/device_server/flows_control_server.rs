@@ -1,9 +1,9 @@
 use crate::common::*;
 use crate::device_server::flows_tx::FlowInfo;
 use itertools::Itertools;
-use tokio::sync::Mutex;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use super::flows_tx::{FlowsTransmitter, FPP_MAX, MAX_FLOWS};
 use crate::protocol::flows_control::{FlowControlError, FlowHandle};
@@ -106,14 +106,12 @@ pub async fn run_server(
             dst_port: rx_port,
             local_channel_indices: channel_indices,
           };
-          let result = flows_tx.lock().await.as_mut().unwrap()
-            .add_flow(
-              flow_info,
-              fpp as usize,
-              (bits_per_sample / 8) as usize,
-              None,
-              false,
-            )
+          let result = flows_tx
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .add_flow(flow_info, fpp as usize, (bits_per_sample / 8) as usize, None, false)
             .await;
           match result {
             Ok((flow_index, handle)) => {
@@ -157,7 +155,9 @@ pub async fn run_server(
             })
             .collect_vec();
 
-          if let Ok(_flow_index) = flows_tx.lock().await.as_mut().unwrap().set_channels(handle, channel_indices.clone()).await {
+          if let Ok(_flow_index) =
+            flows_tx.lock().await.as_mut().unwrap().set_channels(handle, channel_indices.clone()).await
+          {
             info!("set channels {channel_indices:?} in flow {handle:?}");
             conn.respond(&[]).await;
           } else {

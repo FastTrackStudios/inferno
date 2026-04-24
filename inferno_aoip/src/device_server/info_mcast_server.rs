@@ -1,9 +1,9 @@
-use crate::byte_utils::*;
 use super::channels_subscriber::ChannelsSubscriber;
+use crate::byte_utils::*;
 use crate::common::*;
+use crate::media_clock::MediaClock;
 use crate::net_utils::UdpSocketWrapper;
 use crate::protocol::mcast::{make_packet, MulticastMessage};
-use crate::media_clock::MediaClock;
 use crate::{byte_utils::write_str_to_buffer, device_info::DeviceInfo};
 use bytebuffer::ByteBuffer;
 use std::sync::atomic::Ordering;
@@ -258,9 +258,9 @@ impl<'s> Multicaster<'s> {
       0x00, 0x1c, 0x80, 0x04, 0x00, 0x04, 0x00, 0x10, 0x17, 0x0f, 0x00, 0x00,
       0x00, 0x02, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, missed packets, 4B: 0x00, 0x03, 0x90, 0x1e, 0x00, 0x00, 0x00, 0x00
        */
-       if !self.had_clock {
-         debug!("clock appeared");
-       }
+      if !self.had_clock {
+        debug!("clock appeared");
+      }
     } else {
       debug!("no clock available");
     }

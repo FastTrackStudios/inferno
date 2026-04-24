@@ -8,7 +8,6 @@ use crate::{byte_utils::make_u16, device_info::DeviceInfo};
 
 use super::req_resp::{Connection, HEADER_LENGTH};
 
-
 pub const PACKET_SIZE_SOFT_LIMIT: usize = 800;
 pub const PORT: u16 = 4440;
 
@@ -67,7 +66,7 @@ pub mod get_device_names {
     pub factory_hostname_offset: u16,
     pub friendly_hostname_offset2: u16,
     pub unknown5_0: [u16; 6], // was [0, 0, 4, 0, 4, 0]
-    pub start_code: u16, // 0x2729
+    pub start_code: u16,      // 0x2729
     pub unknown6_0: u16,
     pub unknown_opcode_1102: u16,
     pub unknown7_0: u16,
@@ -148,7 +147,7 @@ pub mod get_transmit_channels_friendly_names {
 
 pub mod rename_tx_channels {
   pub const OPCODE: u16 = 0x2013;
-  
+
   #[derive(Debug, binary_serde::BinarySerde, Default)]
   pub struct SingleChannelRenameRequest {
     pub unknown1_0: u16,
@@ -235,7 +234,6 @@ pub mod delete_multicast_tx_flow {
   pub const OPCODE: u16 = 0x2202;
 }
 
-
 pub mod query_rx_flows {
   pub const OPCODE: u16 = 0x3200;
 
@@ -282,9 +280,11 @@ pub mod set_channels_subscriptions {
 pub fn serialize_items<InItem, OutItem>(
   space_items: u8,
   source: impl IntoIterator<Item = InItem>,
-  mut transform: impl FnMut(InItem, &mut ByteBuffer) -> Option<OutItem>
+  mut transform: impl FnMut(InItem, &mut ByteBuffer) -> Option<OutItem>,
 ) -> (bool, Vec<u8>)
-  where OutItem: BinarySerde {
+where
+  OutItem: BinarySerde,
+{
   let mut bytes = ByteBuffer::new();
   bytes.write_bytes(&[0u8; HEADER_LENGTH]);
   bytes.write_u8(space_items);
@@ -293,8 +293,8 @@ pub fn serialize_items<InItem, OutItem>(
     return (false, bytes.as_bytes()[HEADER_LENGTH..].into());
   }
   let space_items: usize = space_items.into();
-  bytes.write_bytes(&vec![0u8; space_items*OutItem::SERIALIZED_SIZE]);
-  
+  bytes.write_bytes(&vec![0u8; space_items * OutItem::SERIALIZED_SIZE]);
+
   let source = source.into_iter();
   let mut item_pos = 2 + HEADER_LENGTH;
   let mut actual_items = 0;
@@ -329,7 +329,7 @@ pub fn serialize_items<InItem, OutItem>(
 }
 
 pub fn extract_start_index(request_payload: &[u8]) -> Option<usize> {
-  if request_payload.len() < 4 || (request_payload[2]|request_payload[3])==0 {
+  if request_payload.len() < 4 || (request_payload[2] | request_payload[3]) == 0 {
     error!("got invalid paginate request, payload: {request_payload:?}");
     return None;
   }
@@ -341,9 +341,11 @@ pub fn paginate_make_response<InItem, OutItem>(
   request_payload: &[u8],
   space_items: u8,
   source: impl IntoIterator<Item = InItem>,
-  transform: impl FnMut(InItem, &mut ByteBuffer) -> Option<OutItem>
+  transform: impl FnMut(InItem, &mut ByteBuffer) -> Option<OutItem>,
 ) -> (u16, Vec<u8>)
-  where OutItem: BinarySerde {
+where
+  OutItem: BinarySerde,
+{
   let start_index = match extract_start_index(request_payload) {
     Some(v) => v,
     None => {
@@ -361,13 +363,13 @@ pub async fn paginate_respond<InItem, OutItem>(
   request_payload: &[u8],
   space_items: u8,
   source: impl IntoIterator<Item = InItem>,
-  transform: impl FnMut(InItem, &mut ByteBuffer) -> Option<OutItem>
-)
-  where OutItem: BinarySerde {
+  transform: impl FnMut(InItem, &mut ByteBuffer) -> Option<OutItem>,
+) where
+  OutItem: BinarySerde,
+{
   let (code, bytes) = paginate_make_response(connection, request_payload, space_items, source, transform);
   connection.respond_with_code(code, &bytes).await;
 }
-
 
 pub struct ItemsInPacketIterator<'a, T> {
   items_bytes: &'a [u8],
@@ -385,12 +387,17 @@ impl<'a, T: BinarySerde> Iterator for ItemsInPacketIterator<'a, T> {
       if item_end > self.items_bytes.len() {
         return None;
       }
-      match T::binary_deserialize(&self.items_bytes[item_start..item_end], binary_serde::Endianness::Big) {
+      match T::binary_deserialize(&self.items_bytes[item_start..item_end], binary_serde::Endianness::Big)
+      {
         Ok(item) => {
           return Some(item);
-        },
+        }
         Err(e) => {
-          error!("unable to deserialize item in incoming packet: {e:?}, item: {}, all items: {}", hex::encode(&self.items_bytes[item_start..item_end]), hex::encode(&self.items_bytes));
+          error!(
+            "unable to deserialize item in incoming packet: {e:?}, item: {}, all items: {}",
+            hex::encode(&self.items_bytes[item_start..item_end]),
+            hex::encode(&self.items_bytes)
+          );
         }
       }
     }
@@ -401,9 +408,9 @@ pub fn deserialize_items<'a, T: BinarySerde>(payload: &'a [u8]) -> ItemsInPacket
   let num_items: usize = (*payload.get(1).unwrap_or(&0)).into();
   let num_items = num_items.min(payload.len() / T::SERIALIZED_SIZE);
   ItemsInPacketIterator::<'a, T> {
-    items_bytes: &payload[2..][..num_items*T::SERIALIZED_SIZE],
+    items_bytes: &payload[2..][..num_items * T::SERIALIZED_SIZE],
     item_start: 0,
-    _t: Default::default()
+    _t: Default::default(),
   }
 }
 
@@ -422,7 +429,11 @@ mod tests {
       unknown2_0: 0x03,
     };
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = channels_and_flows_count::Flags2::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized = channels_and_flows_count::Flags2::binary_deserialize(
+      bytes.as_slice(),
+      binary_serde::Endianness::Big,
+    )
+    .unwrap();
     assert_eq!(original.unknown1_0, deserialized.unknown1_0);
     assert_eq!(original.supports_tx_channel_rename, deserialized.supports_tx_channel_rename);
     assert_eq!(original.supports_tx_multicast, deserialized.supports_tx_multicast);
@@ -452,7 +463,11 @@ mod tests {
       unknown8_0: [0; 6],
     };
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = channels_and_flows_count::Response::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized = channels_and_flows_count::Response::binary_deserialize(
+      bytes.as_slice(),
+      binary_serde::Endianness::Big,
+    )
+    .unwrap();
     assert_eq!(original, deserialized);
   }
 
@@ -497,13 +512,12 @@ mod tests {
 
   #[test]
   fn destination_socket_descriptor_roundtrip() {
-    let original = DestinationSocketDescriptor {
-      unknown1_8002: 0x8002,
-      port: 5004,
-      addr: [192, 168, 1, 100],
-    };
+    let original =
+      DestinationSocketDescriptor { unknown1_8002: 0x8002, port: 5004, addr: [192, 168, 1, 100] };
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = DestinationSocketDescriptor::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized =
+      DestinationSocketDescriptor::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big)
+        .unwrap();
     assert_eq!(original.unknown1_8002, deserialized.unknown1_8002);
     assert_eq!(original.port, deserialized.port);
     assert_eq!(original.addr, deserialized.addr);
@@ -522,7 +536,11 @@ mod tests {
       unknown2_0: 0,
     };
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = get_receive_channels::ChannelDescriptor::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized = get_receive_channels::ChannelDescriptor::binary_deserialize(
+      bytes.as_slice(),
+      binary_serde::Endianness::Big,
+    )
+    .unwrap();
     assert_eq!(original.channel_id, deserialized.channel_id);
     assert_eq!(original.subscription_status, deserialized.subscription_status);
   }
@@ -536,7 +554,11 @@ mod tests {
       name_offset: 24,
     };
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = get_transmit_channels::ChannelDescriptor::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized = get_transmit_channels::ChannelDescriptor::binary_deserialize(
+      bytes.as_slice(),
+      binary_serde::Endianness::Big,
+    )
+    .unwrap();
     assert_eq!(original.channel_id, deserialized.channel_id);
     assert_eq!(original.name_offset, deserialized.name_offset);
   }
@@ -549,7 +571,11 @@ mod tests {
       new_name_offset: 42,
     };
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = rename_tx_channels::SingleChannelRenameRequest::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized = rename_tx_channels::SingleChannelRenameRequest::binary_deserialize(
+      bytes.as_slice(),
+      binary_serde::Endianness::Big,
+    )
+    .unwrap();
     assert_eq!(original.channel_id, deserialized.channel_id);
     assert_eq!(original.new_name_offset, deserialized.new_name_offset);
   }
@@ -567,7 +593,11 @@ mod tests {
       receiver_socket_descriptor_offset: 100,
     };
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = query_tx_flows::FlowDescriptorHeader::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized = query_tx_flows::FlowDescriptorHeader::binary_deserialize(
+      bytes.as_slice(),
+      binary_serde::Endianness::Big,
+    )
+    .unwrap();
     assert_eq!(original.flow_id, deserialized.flow_id);
     assert_eq!(original.flow_type, deserialized.flow_type);
     assert_eq!(original.sample_rate, deserialized.sample_rate);
@@ -585,7 +615,9 @@ mod tests {
       unknown5_0: 0,
     };
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = query_rx_flows::Descriptor2::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized =
+      query_rx_flows::Descriptor2::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big)
+        .unwrap();
     assert_eq!(original.latency_ns, deserialized.latency_ns);
     assert_eq!(original.unknown3_800, deserialized.unknown3_800);
   }

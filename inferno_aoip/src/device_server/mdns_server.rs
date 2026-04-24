@@ -4,11 +4,17 @@ use searchfire::{
   net::{IpVersion, TargetInterface},
 };
 use std::{
-  collections::BTreeMap, net::{IpAddr, Ipv4Addr}, sync::{Arc, RwLock}
+  collections::BTreeMap,
+  net::{IpAddr, Ipv4Addr},
+  sync::{Arc, RwLock},
 };
 
 use super::flows_tx::{FPP_MAX_ADVERTISED, FPP_MIN, MAX_CHANNELS_IN_FLOW};
-use crate::{device_info::DeviceInfo, mdns_client::{self_origin_from_self_info, MdnsClient, PointerToMulticast}, utils::LogAndForget};
+use crate::{
+  device_info::DeviceInfo,
+  mdns_client::{self_origin_from_self_info, MdnsClient, PointerToMulticast},
+  utils::LogAndForget,
+};
 
 pub struct DeviceMDNSResponder {
   handle: RwLock<Option<BroadcasterHandle>>,
@@ -29,13 +35,19 @@ pub fn in_addr_type() -> Name {
 }
 fn multicast_ip_to_name(addr: Ipv4Addr) -> Name {
   let octets = addr.octets();
-  Name::from_labels([
-    &octets[3].to_string(), &octets[2].to_string(), &octets[1].to_string(), &octets[0].to_string()
-  ].iter().map(|&s| s.as_bytes())).unwrap()
+  Name::from_labels(
+    [&octets[3].to_string(), &octets[2].to_string(), &octets[1].to_string(), &octets[0].to_string()]
+      .iter()
+      .map(|&s| s.as_bytes()),
+  )
+  .unwrap()
 }
 
 impl DeviceMDNSResponder {
-  pub fn start(self_info: Arc<DeviceInfo>, multicasts_by_channel: Arc<RwLock<BTreeMap<usize, PointerToMulticast>>>) -> Self {
+  pub fn start(
+    self_info: Arc<DeviceInfo>,
+    multicasts_by_channel: Arc<RwLock<BTreeMap<usize, PointerToMulticast>>>,
+  ) -> Self {
     let hostname = Name::from_labels([self_info.friendly_hostname.as_bytes()]).unwrap();
     let bb = BroadcasterBuilder::new()
       .loopback()
@@ -78,15 +90,18 @@ impl DeviceMDNSResponder {
       handle: RwLock::new(Some(handle)),
       self_origin: self_origin_from_self_info(&self_info),
       self_info,
-      multicasts_by_channel
+      multicasts_by_channel,
     }
   }
 
   pub fn add_tx_channel(&self, index: usize) {
     let self_info = &*self.self_info;
-    let bundle = self.multicasts_by_channel.read().unwrap().get(&index).map(|p| {
-      format!("b.{}={}", p.bundle_id, p.channel_in_bundle+1)
-    });
+    let bundle = self
+      .multicasts_by_channel
+      .read()
+      .unwrap()
+      .get(&index)
+      .map(|p| format!("b.{}={}", p.bundle_id, p.channel_in_bundle + 1));
     let service = |ch_name: &str, default: bool| {
       let name =
         Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
@@ -152,7 +167,14 @@ impl DeviceMDNSResponder {
     }
   }
 
-  pub fn add_multicast_bundle(&self, bundle_id: usize, channels_per_flow: usize, fpp: usize, dst_addr: Ipv4Addr, dst_port: u16) {
+  pub fn add_multicast_bundle(
+    &self,
+    bundle_id: usize,
+    channels_per_flow: usize,
+    fpp: usize,
+    dst_addr: Ipv4Addr,
+    dst_port: u16,
+  ) {
     let self_info = &*self.self_info;
     let name =
       Name::from_labels([format!("{}@{}", bundle_id, self_info.friendly_hostname).as_bytes()]).unwrap();
@@ -169,12 +191,13 @@ impl DeviceMDNSResponder {
       .add_txt_truncated(kv("enc", self_info.bits_per_sample))
       .add_txt_truncated(kv("a.0", dst_addr))
       .add_txt_truncated(kv("p.0", dst_port))
-      .build().unwrap();
+      .build()
+      .unwrap();
 
     match handle.as_ref() {
       Some(handle) => {
         handle.add_service(service).log_and_forget();
-      },
+      }
       None => {
         log::error!("BUG: trying to add multicast bundle using BroadcasterHandle after it was shut down");
       }
@@ -189,9 +212,11 @@ impl DeviceMDNSResponder {
     match handle.as_ref() {
       Some(handle) => {
         handle.remove_named_service(service_type("_netaudio-bund"), name).log_and_forget();
-      },
+      }
       None => {
-        log::error!("BUG: trying to remove multicast bundle using BroadcasterHandle after it was shut down");
+        log::error!(
+          "BUG: trying to remove multicast bundle using BroadcasterHandle after it was shut down"
+        );
       }
     }
   }
@@ -201,12 +226,15 @@ impl DeviceMDNSResponder {
     let b = ServiceBuilder::new(in_addr_type(), multicast_ip_to_name(addr), 0)
       .unwrap()
       .add_ip_address(IpAddr::V4(self_info.ip_address))
-      .add_additional_txt(Name::from_labels(["_inferno-response-origin", "local"]).unwrap(), self.self_origin.clone());
+      .add_additional_txt(
+        Name::from_labels(["_inferno-response-origin", "local"]).unwrap(),
+        self.self_origin.clone(),
+      );
     let handle = self.handle.read().unwrap();
     match handle.as_ref() {
       Some(handle) => {
         handle.add_service(b.build().unwrap()).log_and_forget();
-      },
+      }
       None => {
         log::error!("BUG: trying to reserve multicast IP using BroadcasterHandle after it was shut down");
       }
@@ -217,13 +245,14 @@ impl DeviceMDNSResponder {
     match handle.as_ref() {
       Some(handle) => {
         handle.remove_named_service(in_addr_type(), multicast_ip_to_name(addr)).log_and_forget();
-      },
+      }
       None => {
-        log::error!("BUG: trying to remove multicast IP reservation using BroadcasterHandle after it was shut down");
+        log::error!(
+          "BUG: trying to remove multicast IP reservation using BroadcasterHandle after it was shut down"
+        );
       }
     }
   }
-
 
   pub fn shutdown_and_join(&self) {
     self

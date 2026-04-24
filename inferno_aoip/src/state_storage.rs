@@ -52,15 +52,8 @@ mod tests {
   use std::time::{SystemTime, UNIX_EPOCH};
 
   fn temp_state_storage() -> StateStorage {
-    let ts = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .unwrap()
-      .as_nanos();
-    let dir = std::env::temp_dir()
-      .join(format!("inferno_aoip_test_{ts}"))
-      .to_str()
-      .unwrap()
-      .to_owned();
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("inferno_aoip_test_{ts}")).to_str().unwrap().to_owned();
     std::fs::create_dir_all(&dir).unwrap();
     StateStorage { path_prefix: dir + MAIN_SEPARATOR_STR }
   }
@@ -74,10 +67,7 @@ mod tests {
   #[test]
   fn save_and_load_roundtrip() {
     let storage = temp_state_storage();
-    let config = TestConfig {
-      name: "test".to_string(),
-      count: 42,
-    };
+    let config = TestConfig { name: "test".to_string(), count: 42 };
     storage.save("config", &config).unwrap();
     let loaded: TestConfig = storage.load("config").unwrap();
     assert_eq!(config, loaded);
@@ -93,14 +83,8 @@ mod tests {
   #[test]
   fn save_overwrites_existing() {
     let storage = temp_state_storage();
-    let config1 = TestConfig {
-      name: "first".to_string(),
-      count: 1,
-    };
-    let config2 = TestConfig {
-      name: "second".to_string(),
-      count: 2,
-    };
+    let config1 = TestConfig { name: "first".to_string(), count: 1 };
+    let config2 = TestConfig { name: "second".to_string(), count: 2 };
     storage.save("config", &config1).unwrap();
     storage.save("config", &config2).unwrap();
     let loaded: TestConfig = storage.load("config").unwrap();
@@ -111,10 +95,7 @@ mod tests {
   #[test]
   fn save_uses_atomic_rename() {
     let storage = temp_state_storage();
-    let config = TestConfig {
-      name: "atomic".to_string(),
-      count: 99,
-    };
+    let config = TestConfig { name: "atomic".to_string(), count: 99 };
     storage.save("atomic", &config).unwrap();
     // tmp file should not exist after rename
     let tmp_path = format!("{}tmp.atomic{PATH_SUFFIX}", storage.path_prefix);

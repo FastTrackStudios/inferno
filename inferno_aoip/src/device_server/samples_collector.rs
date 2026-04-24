@@ -4,18 +4,13 @@ use crate::{
   common::*,
   device_info::DeviceInfo,
   media_clock::{ClockOverlay, MediaClock},
+  ring_buffer::{ProxyToBuffer, ProxyToSamplesBuffer, RBOutput},
   util::real_time_box_channel::{self, RealTimeBoxReceiver, RealTimeBoxSender},
-  ring_buffer::{
-    ProxyToBuffer, ProxyToSamplesBuffer, RBOutput,
-  },
 };
 use futures::{Future, FutureExt};
 
 use itertools::Itertools;
-use tokio::{
-  sync::mpsc,
-  time::interval,
-};
+use tokio::{sync::mpsc, time::interval};
 
 const READ_INTERVAL: Duration = Duration::from_millis(50);
 const BUFFER_SIZE: usize = 65536;
@@ -361,7 +356,11 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static> SamplesCollector<P> {
     (
       Self { commands_sender: tx },
       async move { internal.run().await }.boxed(),
-      RealTimeSamplesReceiver { channels: receivers, clock: MediaClock::new(false /* TODO */), clock_recv },
+      RealTimeSamplesReceiver {
+        channels: receivers,
+        clock: MediaClock::new(false /* TODO */),
+        clock_recv,
+      },
     )
   }
 

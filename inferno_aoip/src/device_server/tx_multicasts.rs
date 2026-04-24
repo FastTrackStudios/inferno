@@ -14,8 +14,8 @@ use crate::mdns_client::{MdnsClient, PointerToMulticast};
 use crate::state_storage::StateStorage;
 use crate::utils::LogAndForget;
 
+use super::flows_tx::FlowInfo as TXFlowInfo;
 use super::flows_tx::{FlowsTransmitter, MAX_FLOWS};
-use super::flows_tx::{FlowInfo as TXFlowInfo};
 use super::mdns_server::DeviceMDNSResponder;
 
 pub const MEDIA_PORT: u16 = 4321;
@@ -59,53 +59,71 @@ impl TransmitMulticasts {
     mdns_client: Arc<MdnsClient>,
   ) -> Self {
     Self {
-      bundles: Arc::new(Mutex::new((0..MAX_FLOWS).map(|_|None).collect_vec())),
+      bundles: Arc::new(Mutex::new((0..MAX_FLOWS).map(|_| None).collect_vec())),
       multicasts_by_channel,
       should_work: Arc::new(true.into()),
       state_storage,
       self_info,
       flows_tx,
       mdns_server,
-      mdns_client
+      mdns_client,
     }
   }
   pub async fn load_state(&self) {
-    let loaded = self.state_storage.load::<SavedMulticastTXFlows>("tx_multicasts").map(|s|s.flows).unwrap_or(vec![]);
+    let loaded = self
+      .state_storage
+      .load::<SavedMulticastTXFlows>("tx_multicasts")
+      .map(|s| s.flows)
+      .unwrap_or(vec![]);
     for saved in loaded {
       if saved.flow_id == 0 {
         continue;
       }
       if saved.dst_port != MEDIA_PORT {
-        error!("non-default port specified in saved state: {}, changing to {}", saved.dst_port, MEDIA_PORT);
+        error!(
+          "non-default port specified in saved state: {}, changing to {}",
+          saved.dst_port, MEDIA_PORT
+        );
       }
-      let mut flow_index = saved.flow_id-1;
+      let mut flow_index = saved.flow_id - 1;
       {
         let bundles = self.bundles.lock().await;
         if flow_index >= bundles.len() || bundles[flow_index].is_some() {
-          if let Some(new_index) = bundles.iter().position(|b|b.is_none()) {
-            warn!("loading multicast flows: changing id {} to {}", flow_index+1, new_index+1);
+          if let Some(new_index) = bundles.iter().position(|b| b.is_none()) {
+            warn!("loading multicast flows: changing id {} to {}", flow_index + 1, new_index + 1);
             flow_index = new_index;
           } else {
-            error!("unable to read multicast flow from config: too many flows defined, {MAX_FLOWS} allowed");
+            error!(
+              "unable to read multicast flow from config: too many flows defined, {MAX_FLOWS} allowed"
+            );
             continue;
           }
         }
       }
-      self.add_flow_internal(flow_index, saved.local_channel_ids.iter().map(|&id| {
-        if id==0 {
-          None
-        } else {
-          Some(id-1)
-        }
-      }).collect_vec(), saved.dst_addr).await;
+      self
+        .add_flow_internal(
+          flow_index,
+          saved
+            .local_channel_ids
+            .iter()
+            .map(|&id| if id == 0 { None } else { Some(id - 1) })
+            .collect_vec(),
+          saved.dst_addr,
+        )
+        .await;
     }
   }
   pub async fn add_flow(&self, flow_index: usize, channel_indices: Vec<Option<usize>>) {
     self.add_flow_internal(flow_index, channel_indices, Ipv4Addr::UNSPECIFIED).await
   }
-  async fn add_flow_internal(&self, flow_index: usize, channel_indices: Vec<Option<usize>>, preferred_address: Ipv4Addr) {
+  async fn add_flow_internal(
+    &self,
+    flow_index: usize,
+    channel_indices: Vec<Option<usize>>,
+    preferred_address: Ipv4Addr,
+  ) {
     info!("adding flow index {flow_index} with local channel indices {channel_indices:?}");
-    let bytes_per_sample = (self.self_info.bits_per_sample/8).try_into().unwrap();
+    let bytes_per_sample = (self.self_info.bits_per_sample / 8).try_into().unwrap();
     let dst_addr_arc: Arc<AtomicU32> = Arc::new(0.into());
     let fpp = FPP_MAX_ADVERTISED.try_into().unwrap() /* TODO */;
     let dst = {
@@ -128,17 +146,20 @@ impl TransmitMulticasts {
         tx.add_flow(
           flow_info,
           fpp,
-          (self.self_info.bits_per_sample/8).try_into().unwrap(),
+          (self.self_info.bits_per_sample / 8).try_into().unwrap(),
           Some(flow_index.try_into().unwrap()),
-          true
-        ).await.log_and_forget();
+          true,
+        )
+        .await
+        .log_and_forget();
         info!("added multicast flow, waiting grace period...");
         (dst_addr, dst_port)
       } else {
         error!("BUG: TransmitMulticasts::add_flow called but flows_tx is None. this flow will start working only after you restart Inferno");
         (Ipv4Addr::UNSPECIFIED, 0)
       };
-      bundles[flow_index] = Some(Bundle { local_channel_indices: channel_indices.clone(), dst_addr: dst_addr_arc.clone() });
+      bundles[flow_index] =
+        Some(Bundle { local_channel_indices: channel_indices.clone(), dst_addr: dst_addr_arc.clone() });
       (dst_addr, dst_port)
     };
     self.save_state().await;
@@ -173,15 +194,24 @@ impl TransmitMulticasts {
                   let mut mcasts = multicasts_by_channel.write().unwrap();
                   for (channel_in_bundle, chi_opt) in channel_indices.iter().enumerate() {
                     if let Some(chi) = chi_opt {
-                      mcasts.insert(*chi, PointerToMulticast {
-                        tx_hostname: "".to_owned(),
-                        bundle_id: flow_index + 1,
-                        channel_in_bundle
-                      });
+                      mcasts.insert(
+                        *chi,
+                        PointerToMulticast {
+                          tx_hostname: "".to_owned(),
+                          bundle_id: flow_index + 1,
+                          channel_in_bundle,
+                        },
+                      );
                     }
                   }
                 }
-                mdns_server.add_multicast_bundle(flow_index+1, channel_indices.len(), fpp, dst_addr, dst_port);
+                mdns_server.add_multicast_bundle(
+                  flow_index + 1,
+                  channel_indices.len(),
+                  fpp,
+                  dst_addr,
+                  dst_port,
+                );
                 flows_tx.activate_multicast_flow(flow_index.try_into().unwrap());
 
                 // refresh channels so that multicast will be advertised
@@ -191,7 +221,7 @@ impl TransmitMulticasts {
                     mdns_server.add_tx_channel(*index);
                   }
                 }
-                
+
                 // FIXME: we can't do self.save_state().await because we have no self here!
                 // so multicast address won't be saved, sorry
                 // TODO: refactor to make it possible
@@ -213,13 +243,10 @@ impl TransmitMulticasts {
                   dst_port,
                   local_channel_indices: channel_indices.clone(),
                 };
-                flows_tx.add_flow(
-                  flow_info,
-                  fpp,
-                  bytes_per_sample,
-                  Some(flow_index.try_into().unwrap()),
-                  true
-                ).await.log_and_forget();
+                flows_tx
+                  .add_flow(flow_info, fpp, bytes_per_sample, Some(flow_index.try_into().unwrap()), true)
+                  .await
+                  .log_and_forget();
               }
             } else {
               error!("trying to activate multicast flow but we have no flows transmitter active");
@@ -231,11 +258,15 @@ impl TransmitMulticasts {
     }
   }
   pub async fn remove_flow(&self, flow_index: usize) -> Result<(), std::io::Error> {
-    self.remove_flow_internal(flow_index, false).await?;  
+    self.remove_flow_internal(flow_index, false).await?;
     self.save_state().await;
     Ok(())
   }
-  async fn remove_flow_internal(&self, flow_index: usize, ignore_nonexisting: bool) -> Result<(), std::io::Error> {
+  async fn remove_flow_internal(
+    &self,
+    flow_index: usize,
+    ignore_nonexisting: bool,
+  ) -> Result<(), std::io::Error> {
     let mut bundles = self.bundles.lock().await;
     if let Some(bundle) = bundles[flow_index].take() {
       let mut flows_tx_opt = self.flows_tx.lock().await;
@@ -246,7 +277,7 @@ impl TransmitMulticasts {
         }
         let addr_int = bundle.dst_addr.load(std::sync::atomic::Ordering::SeqCst);
         if addr_int != 0 {
-          self.mdns_server.remove_multicast_bundle(flow_index+1);
+          self.mdns_server.remove_multicast_bundle(flow_index + 1);
           self.mdns_server.remove_multicast_ip(Ipv4Addr::from_bits(addr_int));
         }
         let result = flows_tx.remove_multicast_flow(flow_index.try_into().unwrap()).await;
@@ -290,21 +321,30 @@ impl TransmitMulticasts {
     if !self.should_work.load(std::sync::atomic::Ordering::SeqCst) {
       return;
     }
-    let to_save = SavedMulticastTXFlows { flows: self.bundles.lock().await.iter().enumerate().filter_map(|(flow_index, bundle_opt)| {
-      bundle_opt.as_ref().map(|bundle| {
-        SavedMulticastTXFlow {
-          flow_id: flow_index+1,
-          dst_addr: Ipv4Addr::from_bits(bundle.dst_addr.load(std::sync::atomic::Ordering::SeqCst)),
-          dst_port: MEDIA_PORT,
-          local_channel_ids: bundle.local_channel_indices.iter().map(|index_opt| {
-            index_opt.map(|i|i+1).unwrap_or(0)
-          }).collect_vec()
-        }
-      })
-    }).collect_vec() };
+    let to_save = SavedMulticastTXFlows {
+      flows: self
+        .bundles
+        .lock()
+        .await
+        .iter()
+        .enumerate()
+        .filter_map(|(flow_index, bundle_opt)| {
+          bundle_opt.as_ref().map(|bundle| SavedMulticastTXFlow {
+            flow_id: flow_index + 1,
+            dst_addr: Ipv4Addr::from_bits(bundle.dst_addr.load(std::sync::atomic::Ordering::SeqCst)),
+            dst_port: MEDIA_PORT,
+            local_channel_ids: bundle
+              .local_channel_indices
+              .iter()
+              .map(|index_opt| index_opt.map(|i| i + 1).unwrap_or(0))
+              .collect_vec(),
+          })
+        })
+        .collect_vec(),
+    };
     self.state_storage.save("tx_multicasts", &to_save).log_and_forget();
   }
   pub fn get_multicast_by_channel(&self, channel_index: usize) -> Option<PointerToMulticast> {
-    self.multicasts_by_channel.read().unwrap().get(&channel_index).map(|p|p.clone())
+    self.multicasts_by_channel.read().unwrap().get(&channel_index).map(|p| p.clone())
   }
 }

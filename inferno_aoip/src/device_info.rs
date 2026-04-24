@@ -115,7 +115,7 @@ mod tests {
 
   #[test]
   fn large_values_no_overflow() {
-    let device = dummy_device_info(1_000_000_000, 44100*1024);
+    let device = dummy_device_info(1_000_000_000, 44100 * 1024);
     let result = device.latency_samples();
     assert!(result <= usize::MAX);
   }

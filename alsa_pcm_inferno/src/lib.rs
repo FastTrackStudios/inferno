@@ -280,8 +280,8 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         // workaround for pipewire: grace period during startup:
         if ptr > 100000 || this.stream_info.as_ref().unwrap().boundary_add.0 != 0 {
             return (-EPIPE).try_into().unwrap(); // report xrun
-            // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
-            // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
+                                                 // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
+                                                 // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
         }
     }
 
@@ -476,7 +476,7 @@ unsafe extern "C" fn plugin_start(io: *mut snd_pcm_ioplug_t) -> c_int {
     let appl_ptr = (*io).appl_ptr as snd_pcm_sframes_t;
     debug!("plugin_start called with appl_ptr: {appl_ptr}");
     let this = get_private(io);
-    
+
     if let Some(clock_receiver) = &mut this.clock_receiver {
         clock_receiver.update();
         debug!("clock_receiver updated");

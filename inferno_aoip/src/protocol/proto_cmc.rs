@@ -18,8 +18,8 @@ pub const REQUEST_DEVICE_ADVERTISEMENT: u16 = 0x1001;
 #[cfg(test)]
 mod tests {
   use super::*;
-  use binary_serde::BinarySerde;
   use binary_serde::recursive_array::RecursiveArray;
+  use binary_serde::BinarySerde;
 
   #[test]
   fn device_advertisement_default_is_all_zeros() {
@@ -37,7 +37,8 @@ mod tests {
   fn device_advertisement_round_trip_default() {
     let original = DeviceAdvertisement::default();
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = DeviceAdvertisement::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized =
+      DeviceAdvertisement::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
     assert_eq!(original.process_id, deserialized.process_id);
     assert_eq!(original.factory_device_id, deserialized.factory_device_id);
     assert_eq!(original.unknown1_1, deserialized.unknown1_1);
@@ -59,7 +60,8 @@ mod tests {
       unknown3_0: 0,
     };
     let bytes = original.binary_serialize_to_array(binary_serde::Endianness::Big);
-    let deserialized = DeviceAdvertisement::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
+    let deserialized =
+      DeviceAdvertisement::binary_deserialize(bytes.as_slice(), binary_serde::Endianness::Big).unwrap();
     assert_eq!(original.process_id, deserialized.process_id);
     assert_eq!(original.factory_device_id, deserialized.factory_device_id);
     assert_eq!(original.unknown1_1, deserialized.unknown1_1);

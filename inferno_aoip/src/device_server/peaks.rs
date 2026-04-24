@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-  ring_buffer::{ProxyToSamplesBuffer, RingBufferShared},
   common::Sample,
+  ring_buffer::{ProxyToSamplesBuffer, RingBufferShared},
 };
 
 pub fn peaks_of_buffers<P: ProxyToSamplesBuffer>(

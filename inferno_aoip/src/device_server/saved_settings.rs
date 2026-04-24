@@ -3,8 +3,11 @@ use std::sync::Arc;
 use log::error;
 use serde::{Deserialize, Serialize};
 
-use crate::{device_info::{self, DeviceInfo}, state_storage::StateStorage, utils::LogAndForget};
-
+use crate::{
+  device_info::{self, DeviceInfo},
+  state_storage::StateStorage,
+  utils::LogAndForget,
+};
 
 #[derive(Deserialize, Serialize, Default)]
 pub struct ChannelSettings {
@@ -70,4 +73,3 @@ impl SavedChannelsSettings {
     self.state_storage.save("tx_channels", &self.tx_channels).log_and_forget();
   }
 }
-
