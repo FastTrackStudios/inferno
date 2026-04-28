@@ -8,7 +8,7 @@ use crate::{byte_utils::make_u16, device_info::DeviceInfo};
 
 use super::req_resp::{Connection, HEADER_LENGTH};
 
-pub const PACKET_SIZE_SOFT_LIMIT: usize = 800;
+pub const PACKET_SIZE_SOFT_LIMIT: usize = 1400;
 pub const PORT: u16 = 4440;
 
 pub mod channels_and_flows_count {
@@ -329,11 +329,11 @@ where
 }
 
 pub fn extract_start_index(request_payload: &[u8]) -> Option<usize> {
-  if request_payload.len() < 4 || (request_payload[2] | request_payload[3]) == 0 {
+  if request_payload.len() < 6 || (request_payload[4] | request_payload[5]) == 0 {
     error!("got invalid paginate request, payload: {request_payload:?}");
     return None;
   }
-  Some((make_u16(request_payload[2], request_payload[3]) - 1).into())
+  Some((make_u16(request_payload[4], request_payload[5]) - 1).into())
 }
 
 pub fn paginate_make_response<InItem, OutItem>(
@@ -624,17 +624,17 @@ mod tests {
 
   #[test]
   fn extract_start_index_valid() {
-    assert_eq!(extract_start_index(&[0, 0, 0, 5]), Some(4));
+    assert_eq!(extract_start_index(&[0, 0, 0, 0, 0, 5]), Some(4));
   }
 
   #[test]
   fn extract_start_index_too_short() {
-    assert_eq!(extract_start_index(&[0, 0, 0]), None);
+    assert_eq!(extract_start_index(&[0, 0, 0, 0, 0]), None);
   }
 
   #[test]
   fn extract_start_index_zero_value() {
-    assert_eq!(extract_start_index(&[0, 0, 0, 0]), None);
+    assert_eq!(extract_start_index(&[0, 0, 0, 0, 0, 0]), None);
   }
 
   #[test]
