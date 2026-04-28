@@ -129,7 +129,7 @@ pub async fn run_server(
             &mut conn,
             request.content(),
             if subscriber.is_some() {
-              self_info.rx_channels.len().min(32).try_into().unwrap()
+              self_info.rx_channels.len().min(16).try_into().unwrap()
             } else {
               0
             },
