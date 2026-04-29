@@ -329,11 +329,28 @@ where
 }
 
 pub fn extract_start_index(request_payload: &[u8]) -> Option<usize> {
-  if request_payload.len() < 6 || (request_payload[4] | request_payload[5]) == 0 {
-    error!("got invalid paginate request, payload: {request_payload:?}");
+  // Different controllers encode starting_channel in different positions of the
+  // request body:
+  //   - Dante Controller / real Dante devices write it at bytes 4-5.
+  //   - network-audio-controller (netaudio) writes it at bytes 2-3 (its packet
+  //     header is 8 bytes, two shorter than the 10-byte ARC header inferno
+  //     parses, so its on-wire offset shifts).
+  // Accept either: whichever 16-bit field is non-zero is the actual index.
+  if request_payload.len() < 6 {
+    error!("got invalid paginate request, payload too short: {request_payload:?}");
     return None;
   }
-  Some((make_u16(request_payload[4], request_payload[5]) - 1).into())
+  let primary = make_u16(request_payload[4], request_payload[5]);
+  let fallback = make_u16(request_payload[2], request_payload[3]);
+  let starting_channel = if primary != 0 {
+    primary
+  } else if fallback != 0 {
+    fallback
+  } else {
+    error!("got invalid paginate request, no starting_channel found: {request_payload:?}");
+    return None;
+  };
+  Some((starting_channel - 1).into())
 }
 
 pub fn paginate_make_response<InItem, OutItem>(
@@ -623,8 +640,24 @@ mod tests {
   }
 
   #[test]
-  fn extract_start_index_valid() {
+  fn extract_start_index_dante_controller() {
+    // Dante Controller / real devices: starting_channel at bytes 4-5.
     assert_eq!(extract_start_index(&[0, 0, 0, 0, 0, 5]), Some(4));
+  }
+
+  #[test]
+  fn extract_start_index_netaudio_rx() {
+    // netaudio command_receivers payload as observed on the wire (after
+    // inferno strips its 10-byte ARC header). starting_channel lands at
+    // content bytes 2-3 because netaudio's ARC header is 2 bytes shorter.
+    assert_eq!(extract_start_index(&[0, 0, 0, 5, 0, 0]), Some(4));
+  }
+
+  #[test]
+  fn extract_start_index_netaudio_tx() {
+    // netaudio command_transmitters: HBBHH layout puts the count byte at
+    // content[1] and starting_channel at content[2-3].
+    assert_eq!(extract_start_index(&[0, 1, 0, 5, 0, 0]), Some(4));
   }
 
   #[test]
