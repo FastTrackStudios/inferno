@@ -11,7 +11,7 @@ use inferno_aoip::device_server::{
 use inferno_aoip::utils::run_future_in_new_thread;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use libc::{c_char, c_int, c_void, eventfd, EFD_CLOEXEC, EFD_NONBLOCK, EPIPE, POLLIN, POLLOUT};
+use libc::{EFD_CLOEXEC, EFD_NONBLOCK, EPIPE, POLLIN, POLLOUT, c_char, c_int, c_void, eventfd};
 use log::{debug, error, warn};
 use std::collections::BTreeMap;
 use std::ffi::CStr;
@@ -253,7 +253,10 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
             if d.saturating_abs() <= max_diff {
                 diff = d;
             } else {
-                error!("very large hw-appl ptr diff: {diff} = {ptr} - {appl_ptr}, boundary_add {} ({boundary}). reporting xrun because something is clearly wrong", this.stream_info.as_ref().unwrap().boundary_add.0);
+                error!(
+                    "very large hw-appl ptr diff: {diff} = {ptr} - {appl_ptr}, boundary_add {} ({boundary}). reporting xrun because something is clearly wrong",
+                    this.stream_info.as_ref().unwrap().boundary_add.0
+                );
                 return (-EPIPE).try_into().unwrap(); // report xrun
             }
         }
@@ -271,7 +274,10 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         if let Ok(hw_ptr) = ptr.try_into() {
             let ioplug_avail = snd_pcm_ioplug_avail(io, hw_ptr, (*io).appl_ptr);
             let ioplug_hw_avail = snd_pcm_ioplug_hw_avail(io, hw_ptr, (*io).appl_ptr);
-            warn!("XRUN: buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}, hw_ptr {hw_ptr}, appl_ptr {}", (*io).appl_ptr);
+            warn!(
+                "XRUN: buffered for {dir}: {buffered} samples, avail {ioplug_avail}, hw_avail {ioplug_hw_avail}, hw_ptr {hw_ptr}, appl_ptr {}",
+                (*io).appl_ptr
+            );
         } else {
             warn!("severe clock discontinuity");
             return (-EPIPE).try_into().unwrap(); // report xrun
@@ -280,8 +286,8 @@ unsafe extern "C" fn plugin_pointer(io: *mut snd_pcm_ioplug_t) -> snd_pcm_sframe
         // workaround for pipewire: grace period during startup:
         if ptr > 100000 || this.stream_info.as_ref().unwrap().boundary_add.0 != 0 {
             return (-EPIPE).try_into().unwrap(); // report xrun
-                                                 // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
-                                                 // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
+            // TODO check for xruns in ExternalRingBuffer because this function may be called too seldom
+            // FIXME we're restarting the whole transmitter/receiver on xrun which results in a LONG break, unacceptable!
         }
     }
 
@@ -320,7 +326,14 @@ unsafe extern "C" fn plugin_prepare(io: *mut snd_pcm_ioplug_t) -> c_int {
     let channels_areas = std::slice::from_raw_parts(channels_areas, (*io).channels as usize);
     if channels_areas.len() > 0 {
         let area = &channels_areas[0];
-        debug!("got buffer size {} samples * {} channels, first channel: address {:x} with first {}b, step {}b", (*io).buffer_size, channels_areas.len(), area.addr as usize, area.first, area.step);
+        debug!(
+            "got buffer size {} samples * {} channels, first channel: address {:x} with first {}b, step {}b",
+            (*io).buffer_size,
+            channels_areas.len(),
+            area.addr as usize,
+            area.first,
+            area.step
+        );
     }
     for area in channels_areas {
         if (area.first % 8) != 0 || (area.step % 8) != 0 {
@@ -801,11 +814,7 @@ unsafe extern "C" fn plugin_define(
     let powers_of_2 = |first, max| {
         core::iter::successors(Some(first), move |n| {
             let r = n * 2;
-            if r > max {
-                None
-            } else {
-                Some(r)
-            }
+            if r > max { None } else { Some(r) }
         })
     };
 

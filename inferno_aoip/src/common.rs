@@ -19,59 +19,62 @@ pub type LongClockDiff = i64;
 /// Hint: wrapped `a > b` is equivalent to `wrapped_diff(a, b) > 0`
 /// This function is intentionally not defined for LongClock, because diffs should never exceed i32 anyway.
 pub fn wrapped_diff(a: Clock, b: Clock) -> ClockDiff {
-  (a as ClockDiff).wrapping_sub(b as ClockDiff)
+    (a as ClockDiff).wrapping_sub(b as ClockDiff)
 }
 
 pub trait LogAndForget {
-  fn log_and_forget(&self);
+    fn log_and_forget(&self);
 }
 
 impl<T, E: std::fmt::Debug> LogAndForget for Result<T, E> {
-  fn log_and_forget(&self) {
-    if let Err(e) = self {
-      warn!("Encountered error {e:?} at {:?}", std::backtrace::Backtrace::capture());
+    fn log_and_forget(&self) {
+        if let Err(e) = self {
+            warn!(
+                "Encountered error {e:?} at {:?}",
+                std::backtrace::Backtrace::capture()
+            );
+        }
     }
-  }
 }
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+    use super::*;
 
-  #[test]
-  fn wrapped_diff_positive() {
-    assert_eq!(wrapped_diff(10, 5), 5);
-  }
+    #[test]
+    fn wrapped_diff_positive() {
+        assert_eq!(wrapped_diff(10, 5), 5);
+    }
 
-  #[test]
-  fn wrapped_diff_negative() {
-    assert_eq!(wrapped_diff(5, 10), -5);
-  }
+    #[test]
+    fn wrapped_diff_negative() {
+        assert_eq!(wrapped_diff(5, 10), -5);
+    }
 
-  #[test]
-  fn wrapped_diff_max_to_zero() {
-    assert_eq!(wrapped_diff(usize::MAX, 0), -1);
-  }
+    #[test]
+    fn wrapped_diff_max_to_zero() {
+        assert_eq!(wrapped_diff(usize::MAX, 0), -1);
+    }
 
-  #[test]
-  fn wrapped_diff_zero_to_max() {
-    assert_eq!(wrapped_diff(0, usize::MAX), 1);
-  }
+    #[test]
+    fn wrapped_diff_zero_to_max() {
+        assert_eq!(wrapped_diff(0, usize::MAX), 1);
+    }
 
-  #[test]
-  fn wrapped_diff_same() {
-    assert_eq!(wrapped_diff(0, 0), 0);
-  }
+    #[test]
+    fn wrapped_diff_same() {
+        assert_eq!(wrapped_diff(0, 0), 0);
+    }
 
-  #[test]
-  fn log_and_forget_ok() {
-    let result: Result<(), &str> = Ok(());
-    result.log_and_forget();
-  }
+    #[test]
+    fn log_and_forget_ok() {
+        let result: Result<(), &str> = Ok(());
+        result.log_and_forget();
+    }
 
-  #[test]
-  fn log_and_forget_err() {
-    let result: Result<(), &str> = Err("test error");
-    result.log_and_forget();
-  }
+    #[test]
+    fn log_and_forget_err() {
+        let result: Result<(), &str> = Err("test error");
+        result.log_and_forget();
+    }
 }

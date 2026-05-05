@@ -105,7 +105,7 @@ pub use util::bytes as byte_utils;
 pub use util::net as net_utils;
 
 pub mod utils {
-  pub use crate::common::LogAndForget;
-  pub use crate::util::os::set_current_thread_realtime;
-  pub use crate::util::thread::run_future_in_new_thread;
+    pub use crate::common::LogAndForget;
+    pub use crate::util::os::set_current_thread_realtime;
+    pub use crate::util::thread::run_future_in_new_thread;
 }
