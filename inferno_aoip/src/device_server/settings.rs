@@ -243,29 +243,123 @@ impl Settings {
             .get("RX_CHANNELS")
             .map(|s| s.parse().expect("number of channels must be u16"))
             .unwrap_or(2);
-        result.make_rx_channels(rx_count);
+        let rx_names = parse_channel_name_map(config.get("RX_CHANNEL_NAMES"));
+        result.make_rx_channels(rx_count, &rx_names);
         let tx_count = config
             .get("TX_CHANNELS")
             .map(|s| s.parse().expect("number of channels must be u16"))
             .unwrap_or(2);
-        result.make_tx_channels(tx_count);
+        let tx_names = parse_channel_name_map(config.get("TX_CHANNEL_NAMES"));
+        result.make_tx_channels(tx_count, &tx_names);
 
         result
     }
-    pub fn make_rx_channels(&mut self, count: usize) {
+    pub fn make_rx_channels(&mut self, count: usize, names: &BTreeMap<usize, String>) {
         self.self_info.rx_channels = (1..=count)
             .map(|id| Channel {
                 factory_name: format!("{id:02}"),
-                friendly_name: Arc::new(RwLock::new(format!("RX {id}"))),
+                friendly_name: Arc::new(RwLock::new(
+                    names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("RX {id}")),
+                )),
             })
             .collect();
     }
-    pub fn make_tx_channels(&mut self, count: usize) {
+    pub fn make_tx_channels(&mut self, count: usize, names: &BTreeMap<usize, String>) {
         self.self_info.tx_channels = (1..=count)
             .map(|id| Channel {
                 factory_name: format!("{id:02}"),
-                friendly_name: Arc::new(RwLock::new(format!("TX {id}"))),
+                friendly_name: Arc::new(RwLock::new(
+                    names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("TX {id}")),
+                )),
             })
             .collect();
+    }
+}
+
+/// Parse a channel-name map from a config value. Format is a list of
+/// `id=name` entries separated by `;` (semicolons are extremely rare in
+/// Dante channel names; commas would clash with names like "MTRX1,2").
+/// Whitespace around `id` and `name` is trimmed; empty entries are
+/// skipped. Examples:
+///
+///   `1=Master Bus L;2=Master Bus R;91=Snare`
+///   `1=Lead Mic 1`
+///
+/// These names seed each channel's `friendly_name` at startup. If the
+/// device has been ARC-renamed at runtime, the saved-state file
+/// overrides these defaults via `SavedChannelsSettings::load`, so user
+/// edits in Dante Controller still win.
+fn parse_channel_name_map(raw: Option<&String>) -> BTreeMap<usize, String> {
+    let mut out = BTreeMap::new();
+    let Some(s) = raw else {
+        return out;
+    };
+    for entry in s.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((id_str, name)) = entry.split_once('=') else {
+            log::warn!("ignoring malformed channel-name entry (missing '='): {entry:?}");
+            continue;
+        };
+        let id_str = id_str.trim();
+        let name = name.trim().to_owned();
+        match id_str.parse::<usize>() {
+            Ok(id) if id >= 1 => {
+                out.insert(id, name);
+            }
+            Ok(_) => log::warn!("ignoring channel-name entry with id 0: {entry:?}"),
+            Err(_) => log::warn!("ignoring channel-name entry with non-numeric id: {entry:?}"),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_channel_name_map;
+
+    #[test]
+    fn parses_basic_entries() {
+        let s = "1=Master Bus L;2=Master Bus R;91=Snare".to_string();
+        let map = parse_channel_name_map(Some(&s));
+        assert_eq!(map.get(&1).map(|s| s.as_str()), Some("Master Bus L"));
+        assert_eq!(map.get(&2).map(|s| s.as_str()), Some("Master Bus R"));
+        assert_eq!(map.get(&91).map(|s| s.as_str()), Some("Snare"));
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        let s = "  1 = Vocal Mic 1 ; 2= Vocal Mic 2  ".to_string();
+        let map = parse_channel_name_map(Some(&s));
+        assert_eq!(map.get(&1).map(|s| s.as_str()), Some("Vocal Mic 1"));
+        assert_eq!(map.get(&2).map(|s| s.as_str()), Some("Vocal Mic 2"));
+    }
+
+    #[test]
+    fn skips_empty_entries() {
+        let s = ";;1=Foo;;".to_string();
+        let map = parse_channel_name_map(Some(&s));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn returns_empty_for_none() {
+        assert!(parse_channel_name_map(None).is_empty());
+    }
+
+    #[test]
+    fn rejects_non_numeric_id() {
+        let s = "abc=Name;2=Real".to_string();
+        let map = parse_channel_name_map(Some(&s));
+        assert!(!map.contains_key(&1));
+        assert_eq!(map.get(&2).map(|s| s.as_str()), Some("Real"));
     }
 }

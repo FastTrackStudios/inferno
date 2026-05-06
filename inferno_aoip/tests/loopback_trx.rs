@@ -40,8 +40,8 @@ fn make_settings(
   config.insert("BIND_IP".to_string(), "127.0.0.1".to_string());
 
   let mut settings = Settings::new(name, name, Some(Ipv4Addr::new(127, 0, 0, 1)), &config);
-  settings.make_rx_channels(rx_channels);
-  settings.make_tx_channels(tx_channels);
+  settings.make_rx_channels(rx_channels, &Default::default());
+  settings.make_tx_channels(tx_channels, &Default::default());
   settings
 }
 
